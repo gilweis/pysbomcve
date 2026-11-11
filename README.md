@@ -40,7 +40,7 @@
 ### Install from Source
 
 ```bash
-git clone https://github.com/user/pysbomcve.git
+git clone https://github.com/gilweis/pysbomcve.git
 cd pysbomcve
 pip install -r requirements.txt
 pip install -e .
