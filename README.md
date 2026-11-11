@@ -76,6 +76,26 @@ python -m pysbomcve --sbom examples/sbom.json --cve examples/cve.json -o results
 
 ---
 
+## Desktop GUI
+
+The project includes a ready‑to‑use desktop GUI built with **Tkinter**.  
+Run the GUI with the `--gui` flag (or the dedicated entry point `pysbomcve-gui`).
+
+```bash
+python -m pysbomcve --gui
+# or
+pysbomcve-gui
+```
+
+The GUI lets you:
+
+- Select an SBOM JSON file and a CVE JSON file via file dialogs.
+- Scan for vulnerable components.
+- View results in three modes: **Combined** (summary + raw JSON), **Summary**, and **JSON**.
+- Save the results to a file or clear the view.
+
+The underlying matching logic is the same as the CLI; the GUI simply calls `match_sbom_cve` and formats the output for display.
+
 ## Python Module API Usage
 
 You can import and use `pysbomcve` directly in your Python code, backend services, or future GUI applications:
