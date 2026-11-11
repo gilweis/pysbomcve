@@ -1,0 +1,103 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.4",
+  "serialNumber": "urn:uuid:3e671687-395b-41f5-a30f-a58921a69b79",
+  "version": 1,
+  "metadata": {
+    "timestamp": "2026-11-11T20:00:00Z",
+    "tools": [
+      {
+        "vendor": "CycloneDX",
+        "name": "generator",
+        "version": "1.0.0"
+      }
+    ],
+    "component": {
+      "type": "application",
+      "bom-ref": "pkg:generic/ecommerce-platform@1.0.0",
+      "name": "ecommerce-platform",
+      "version": "1.0.0",
+      "description": "Enterprise E-commerce Platform Service",
+      "purl": "pkg:generic/ecommerce-platform@1.0.0"
+    }
+  },
+  "components": [
+    {
+      "type": "library",
+      "bom-ref": "pkg:pypi/payment-gateway-client@3.2.0",
+      "name": "payment-gateway-client",
+      "version": "3.2.0",
+      "description": "Internal payment processor communication client",
+      "purl": "pkg:pypi/payment-gateway-client@3.2.0"
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:pypi/requests@2.28.0",
+      "name": "requests",
+      "version": "2.28.0",
+      "description": "Python HTTP for Humans",
+      "purl": "pkg:pypi/requests@2.28.0",
+      "cpe": "cpe:2.3:a:psf:requests:2.28.0:*:*:*:*:*:*:*"
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:generic/event-audit-service@1.1.0",
+      "name": "event-audit-service",
+      "version": "1.1.0",
+      "description": "Audit logging microservice adapter",
+      "purl": "pkg:generic/event-audit-service@1.1.0"
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:maven/org.apache.logging.log4j/log4j-core@2.14.1",
+      "group": "org.apache.logging.log4j",
+      "name": "log4j-core",
+      "version": "2.14.1",
+      "description": "Apache Log4j Implementation",
+      "purl": "pkg:maven/org.apache.logging.log4j/log4j-core@2.14.1",
+      "cpe": "cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:*"
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:pypi/cryptography@41.0.5",
+      "name": "cryptography",
+      "version": "41.0.5",
+      "description": "Cryptographic recipes and primitives",
+      "purl": "pkg:pypi/cryptography@41.0.5"
+    }
+  ],
+  "dependencies": [
+    {
+      "ref": "pkg:generic/ecommerce-platform@1.0.0",
+      "dependsOn": [
+        "pkg:pypi/payment-gateway-client@3.2.0",
+        "pkg:generic/event-audit-service@1.1.0",
+        "pkg:pypi/cryptography@41.0.5"
+      ]
+    },
+    {
+      "ref": "pkg:pypi/payment-gateway-client@3.2.0",
+      "dependsOn": [
+        "pkg:pypi/requests@2.28.0"
+      ]
+    },
+    {
+      "ref": "pkg:generic/event-audit-service@1.1.0",
+      "dependsOn": [
+        "pkg:maven/org.apache.logging.log4j/log4j-core@2.14.1"
+      ]
+    },
+    {
+      "ref": "pkg:pypi/requests@2.28.0",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:maven/org.apache.logging.log4j/log4j-core@2.14.1",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:pypi/cryptography@41.0.5",
+      "dependsOn": []
+    }
+  ]
+}

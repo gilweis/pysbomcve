@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pysbomcve"
+version = "0.1.0"
+description = "A Python tool and library to match CVE vulnerabilities against CycloneDX and SPDX SBOMs with full tree lineage to root."
+readme = "README.md"
+authors = [{ name = "pysbomcve contributors" }]
+license = { text = "MIT" }
+requires-python = ">=3.8"
+dependencies = [
+    "packaging>=20.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pylint>=3.0.0",
+]
+
+[project.scripts]
+pysbomcve = "pysbomcve.cli:main"
+pysbomcve-gui = "pysbomcve.gui:main"
+
+[project.gui-scripts]
+pysbomcve-gui = "pysbomcve.gui:main"
+
+[tool.setuptools.packages.find]
+include = ["pysbomcve*"]

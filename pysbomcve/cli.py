@@ -1,0 +1,214 @@
+"""Command-line interface for pysbomcve.
+
+This module provides a console tool to match SBOMs against CVE JSON 5.0 records,
+printing human-readable and JSON results to stdout and saving results to a file.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+from pysbomcve.matcher import match_sbom_cve
+
+
+def _format_cve_lines(cves: List[Dict[str, Any]]) -> List[str]:
+    """Format matching CVE bullet points."""
+    lines: List[str] = [f"    Matched CVEs ({len(cves)}):"]
+    for cve in cves:
+        cve_id = cve.get("cveId", "Unknown")
+        sev = cve.get("severity", "N/A")
+        score = cve.get("score", "N/A")
+        title = cve.get("title", "")
+        lines.append(f"      * {cve_id} [Severity: {sev}, Score: {score}]")
+        if title:
+            lines.append(f"        Title: {title}")
+    return lines
+
+
+def _format_path_lines(
+    paths: List[List[Dict[str, Any]]], comp_name: str, comp_ver: str
+) -> List[str]:
+    """Format ancestor path lines."""
+    lines: List[str] = ["    Lineage to Root:"]
+    if not paths:
+        lines.append("      (Direct root component)")
+        return lines
+
+    for idx, path in enumerate(paths, 1):
+        chain_parts = [f"{comp_name} ({comp_ver})"]
+        for parent in path:
+            p_name = parent.get("name", "unknown")
+            p_ver = parent.get("version") or parent.get("versionInfo") or ""
+            chain_parts.append(f"{p_name} ({p_ver})" if p_ver else p_name)
+        lines.append(f"      Path {idx}: {' -> '.join(chain_parts)}")
+    return lines
+
+
+def _format_item_summary(item_dict: Dict[str, Any]) -> str:
+    """Format a summary string for a single vulnerable SBOM component.
+
+    Args:
+        item_dict: Matching component dictionary containing 'item', 'cves', and 'lineage_paths'.
+
+    Returns:
+        Formatted multi-line summary string.
+    """
+    comp = item_dict.get("item", {})
+    comp_name = comp.get("name", "unknown")
+    comp_ver = comp.get("version") or comp.get("versionInfo") or "unknown"
+
+    lines: List[str] = [f"[-] Component: {comp_name} @ {comp_ver}"]
+    if comp.get("purl"):
+        lines.append(f"    PURL: {comp['purl']}")
+
+    lines.extend(_format_cve_lines(item_dict.get("cves", [])))
+    lines.extend(_format_path_lines(item_dict.get("lineage_paths", []), comp_name, comp_ver))
+
+    return "\n".join(lines)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Build the argument parser for pysbomcve CLI.
+
+    Returns:
+        Configured argparse.ArgumentParser instance.
+    """
+    parser = argparse.ArgumentParser(
+        prog="pysbomcve",
+        description="Match CycloneDX and SPDX SBOM components against CVE JSON 5.0 records.",
+    )
+    parser.add_argument(
+        "--sbom",
+        default=None,
+        help="Path to the SBOM JSON file (CycloneDX or SPDX format).",
+    )
+    parser.add_argument(
+        "--cve",
+        default=None,
+        help="Path to the CVE JSON 5.0 file, list file, or directory.",
+    )
+    parser.add_argument(
+        "--gui",
+        action="store_true",
+        help="Launch the desktop graphical user interface (GUI).",
+    )
+    parser.add_argument(
+        "--out",
+        "-o",
+        dest="out",
+        default=None,
+        help="Path to the output JSON file where results will be saved.",
+    )
+    parser.add_argument(
+        "--indent",
+        type=int,
+        default=2,
+        help="JSON indentation level for output formatting (default: 2).",
+    )
+    parser.add_argument(
+        "--fail-on-cve",
+        action="store_true",
+        help="Exit with return code 1 if one or more vulnerable items are found.",
+    )
+    return parser
+
+
+def _validate_input_paths(sbom_path: Path, cve_path: Path) -> Optional[str]:
+    """Validate that input files exist on disk."""
+    if not sbom_path.exists():
+        return f"Error: SBOM file not found: {sbom_path}\n"
+    if not cve_path.exists():
+        return f"Error: CVE source not found: {cve_path}\n"
+    return None
+
+
+def run_cli(args: Optional[List[str]] = None) -> int:
+    """Execute the CLI logic.
+
+    Args:
+        args: Optional list of argument strings. Uses sys.argv[1:] if None.
+
+    Returns:
+        Exit code (0 for success, 1 on vulnerability when --fail-on-cve set or error).
+    """
+    parser = build_parser()
+    parsed_args = parser.parse_args(args)
+
+    if parsed_args.gui:
+        # pylint: disable=import-outside-toplevel
+        from pysbomcve.gui import launch_gui
+
+        launch_gui()
+        return 0
+
+    if not parsed_args.sbom or not parsed_args.cve:
+        parser.error("the following arguments are required: --sbom, --cve (or use --gui)")
+
+    sbom_path = Path(parsed_args.sbom)
+    cve_path = Path(parsed_args.cve)
+
+    path_error = _validate_input_paths(sbom_path, cve_path)
+    if path_error:
+        sys.stderr.write(path_error)
+        return 1
+
+    try:
+        results = match_sbom_cve(sbom_path, cve_path)
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        sys.stderr.write(f"Error during matching: {exc}\n")
+        return 1
+
+    total_vulns = sum(len(item.get("cves", [])) for item in results)
+
+    # Print human-readable summary
+    print("=" * 70)
+    print("                      pysbomcve Scan Report")
+    print("=" * 70)
+    print(f"SBOM: {sbom_path}")
+    print(f"CVE : {cve_path}")
+    print(f"Total vulnerable items found: {len(results)}")
+    print(f"Total matching CVEs         : {total_vulns}")
+    print("=" * 70)
+
+    if results:
+        print("\nVulnerable Components:")
+        for item in results:
+            print(_format_item_summary(item))
+            print("-" * 70)
+    else:
+        print("\nNo vulnerabilities matched against the provided SBOM components.")
+
+    # Print full JSON result to console
+    print("\n--- JSON Result ---")
+    json_output = json.dumps(results, indent=parsed_args.indent)
+    print(json_output)
+
+    # Save to output file if requested
+    if parsed_args.out:
+        out_path = Path(parsed_args.out)
+        try:
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(out_path, "w", encoding="utf-8") as out_file:
+                out_file.write(json_output)
+            print(f"\n[+] Results successfully saved to: {out_path.resolve()}")
+        except OSError as exc:
+            sys.stderr.write(f"Error writing output to {out_path}: {exc}\n")
+            return 1
+
+    if parsed_args.fail_on_cve and results:
+        return 1
+
+    return 0
+
+
+def main() -> None:
+    """Main CLI entry point function."""
+    sys.exit(run_cli())
+
+
+if __name__ == "__main__":
+    main()
