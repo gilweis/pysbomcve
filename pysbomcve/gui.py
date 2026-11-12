@@ -1,19 +1,21 @@
 """Desktop Graphical User Interface (GUI) for pysbomcve.
 
 This module provides a Tkinter-based desktop application that allows users to
-select SBOM and CVE JSON files, execute vulnerability matching, and view the
-results in a scrollable text box with vertical and horizontal scrollbars.
+select an SBOM file and a CVE file or directory, execute vulnerability matching,
+and view the results in a scrollable text box.
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
-from pysbomcve.cli import _format_item_summary
+from pysbomcve.cli import _add_examples_dir_argument, _format_item_summary
+from pysbomcve.graph_view import ResultsGraphWindow
 from pysbomcve.matcher import match_sbom_cve
 
 
@@ -21,16 +23,25 @@ from pysbomcve.matcher import match_sbom_cve
 class SBOMCVEApp:
     """Desktop GUI application for matching SBOM components against CVE records."""
 
-    def __init__(self, root: tk.Tk) -> None:
+    def __init__(
+        self, root: tk.Tk, examples_dir: Optional[Union[str, Path]] = None
+    ) -> None:
         """Initialize the desktop GUI window and components.
 
         Args:
             root: Root Tkinter window.
+            examples_dir: Folder containing sbom.json and cve.json, or None
+                to use the project's examples folder.
         """
         self.root: tk.Tk = root
         self.root.title("pysbomcve - SBOM & CVE Vulnerability Matcher")
         self.root.geometry("950x700")
         self.root.minsize(750, 500)
+        self.examples_dir: Path = (
+            Path(examples_dir).expanduser().resolve()
+            if examples_dir is not None
+            else Path(__file__).resolve().parent.parent / "examples"
+        )
 
         # State variables
         self.sbom_path_var: tk.StringVar = tk.StringVar()
@@ -80,7 +91,7 @@ class SBOMCVEApp:
         subtitle_lbl = ttk.Label(
             header_frame,
             text=(
-                "Select a CycloneDX or SPDX SBOM file and a CVE JSON 5.0 record file "
+                "Select a CycloneDX or SPDX SBOM file and a CVE JSON file or folder "
                 "to find vulnerable packages with full tree lineage to root."
             ),
         )
@@ -102,13 +113,19 @@ class SBOMCVEApp:
         )
 
         # CVE row
-        ttk.Label(frame, text="CVE File (CVE JSON 5.0):").grid(
+        ttk.Label(frame, text="CVE File or Folder (CVE JSON 5.0):").grid(
             row=1, column=0, sticky=tk.W, pady=4
         )
         cve_entry = ttk.Entry(frame, textvariable=self.cve_path_var, width=65)
         cve_entry.grid(row=1, column=1, sticky=tk.EW, padx=5, pady=4)
-        ttk.Button(frame, text="Browse...", command=self.browse_cve).grid(
+        ttk.Button(frame, text="File...", command=self.browse_cve).grid(
             row=1, column=2, padx=2, pady=4
+        )
+        ttk.Button(frame, text="Folder...", command=self.browse_cve_directory).grid(
+            row=1, column=3, padx=2, pady=4
+        )
+        ttk.Label(frame, text="Folder scans include JSON files in that folder only.").grid(
+            row=2, column=1, columnspan=3, sticky=tk.W
         )
 
         frame.columnconfigure(1, weight=1)
@@ -148,8 +165,16 @@ class SBOMCVEApp:
         )
         clear_btn.pack(side=tk.LEFT, padx=5)
 
+        options_frame = ttk.Frame(parent)
+        options_frame.pack(fill=tk.X, pady=(0, 8))
+        ttk.Button(
+            options_frame,
+            text="Graphical Results...",
+            command=self.show_graph,
+        ).pack(side=tk.LEFT)
+
         # View Mode radio buttons
-        view_frame = ttk.Frame(frame)
+        view_frame = ttk.Frame(options_frame)
         view_frame.pack(side=tk.RIGHT)
         ttk.Label(view_frame, text="Display:").pack(side=tk.LEFT, padx=(0, 5))
         ttk.Radiobutton(
@@ -212,7 +237,7 @@ class SBOMCVEApp:
         self._set_text_content(
             "Welcome to pysbomcve!\n\n"
             "1. Select an SBOM JSON file (CycloneDX or SPDX).\n"
-            "2. Select a CVE JSON 5.0 file.\n"
+            "2. Select a CVE JSON 5.0 file or folder.\n"
             "3. Click 'Scan Vulnerabilities' (or 'Load Example Files' to test immediately).\n"
         )
 
@@ -245,17 +270,28 @@ class SBOMCVEApp:
         if file_path:
             self.cve_path_var.set(file_path)
 
+    def browse_cve_directory(self) -> None:
+        """Open a folder dialog to choose a directory of CVE JSON files."""
+        folder_path = filedialog.askdirectory(
+            title="Select CVE Records Folder", parent=self.root, mustexist=True
+        )
+        if folder_path:
+            self.cve_path_var.set(folder_path)
+
     def load_example_files(self) -> None:
-        """Convenience method to fill file paths with project example files."""
-        base_dir = Path(__file__).resolve().parent.parent
-        example_sbom = base_dir / "examples" / "sbom.json"
-        example_cve = base_dir / "examples" / "cve.json"
+        """Fill input paths from the configured examples directory."""
+        example_sbom = self.examples_dir / "sbom.json"
+        example_cve = self.examples_dir / "cve.json"
+        missing = [str(path) for path in (example_sbom, example_cve) if not path.is_file()]
+        if missing:
+            self.status_var.set("Example files not found.")
+            messagebox.showerror(
+                "Example Files Error", "Example files not found:\n" + "\n".join(missing)
+            )
+            return
 
-        if example_sbom.exists():
-            self.sbom_path_var.set(str(example_sbom))
-        if example_cve.exists():
-            self.cve_path_var.set(str(example_cve))
-
+        self.sbom_path_var.set(str(example_sbom))
+        self.cve_path_var.set(str(example_cve))
         self.status_var.set("Example files loaded. Click 'Scan Vulnerabilities' to run.")
 
     def run_scan(self) -> None:
@@ -268,7 +304,7 @@ class SBOMCVEApp:
             return
 
         if not cve_path:
-            messagebox.showwarning("Missing Input", "Please select a CVE JSON file.")
+            messagebox.showwarning("Missing Input", "Please select a CVE JSON file or folder.")
             return
 
         if not Path(sbom_path).exists():
@@ -276,7 +312,7 @@ class SBOMCVEApp:
             return
 
         if not Path(cve_path).exists():
-            messagebox.showerror("File Error", f"CVE file does not exist:\n{cve_path}")
+            messagebox.showerror("File Error", f"CVE file or folder does not exist:\n{cve_path}")
             return
 
         self.status_var.set("Scanning components and matching CVEs...")
@@ -298,6 +334,13 @@ class SBOMCVEApp:
             err_msg = f"Scan failed: {exc}"
             self.status_var.set(err_msg)
             messagebox.showerror("Scan Error", err_msg)
+
+    def show_graph(self) -> Optional[ResultsGraphWindow]:
+        """Open a separate graphical window for the latest scan results."""
+        if self.last_results is None:
+            messagebox.showinfo("No Scan Results", "Run a scan before opening the graph.")
+            return None
+        return ResultsGraphWindow(self.root, self.last_results)
 
     def _format_summary_text(self, results: List[Dict[str, Any]]) -> str:
         """Generate human-readable summary report string."""
@@ -379,16 +422,19 @@ class SBOMCVEApp:
         self.status_var.set("Ready.")
 
 
-def launch_gui() -> None:
-    """Launch the Desktop GUI application."""
+def launch_gui(examples_dir: Optional[Union[str, Path]] = None) -> None:
+    """Launch the Desktop GUI application with an optional examples directory."""
     root = tk.Tk()
-    SBOMCVEApp(root)
+    SBOMCVEApp(root, examples_dir)
     root.mainloop()
 
 
 def main() -> None:
     """Entry point for GUI execution."""
-    launch_gui()
+    parser = argparse.ArgumentParser(description="Launch the pysbomcve desktop GUI.")
+    _add_examples_dir_argument(parser)
+    args = parser.parse_args()
+    launch_gui(args.examples_dir)
 
 
 if __name__ == "__main__":

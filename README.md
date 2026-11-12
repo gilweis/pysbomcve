@@ -15,7 +15,7 @@
   - **SPDX JSON** (v2.2, v2.3)
 - **CVE Format Supported**:
   - **CVE JSON 5.0 / 5.1** (Official [CVEProject/cvelistV5](https://github.com/CVEProject/cvelistV5) schema)
-  - Supports single CVE files, bundled CVE lists, and directories of CVE records.
+  - Supports single CVE files, bundled CVE lists, and .directories of CVE records
 - **Lineage Tracing to Root**:
   - For every vulnerable component identified, the output includes all upper items in the SBOM tree from its immediate parent up to the root application.
 - **Accurate Version & Product Matching**:
@@ -60,8 +60,10 @@ python -m pysbomcve --sbom <path-to-sbom.json> --cve <path-to-cve.json> [--out <
 
 | Parameter | Shorthand | Required | Description |
 |-----------|-----------|----------|-------------|
-| `--sbom` | | **Yes** | Path to the SBOM JSON file (CycloneDX or SPDX format). |
-| `--cve` | | **Yes** | Path to the CVE JSON 5.0 file, directory, or array file. |
+| `--sbom` | | CLI mode | Path to the SBOM JSON file (CycloneDX or SPDX format). |
+| `--cve` | | CLI mode | Path to the CVE JSON 5.0 file, directory, or array file. |
+| `--gui` | | No | Launch the desktop GUI instead of CLI matching. |
+| `--examples-dir` | | No | Folder for the GUI's example files; requires `--gui`. |
 | `--out` | `-o` | No | Path to the output JSON file to save the scan results. |
 | `--indent` | | No | JSON indentation level for console/file output (default: `2`). |
 | `--fail-on-cve` | | No | Exits with status code `1` if any vulnerabilities are found (useful in CI/CD). |
@@ -87,11 +89,35 @@ python -m pysbomcve --gui
 pysbomcve-gui
 ```
 
+To configure the **Load Example Files** button, supply a folder containing
+`sbom.json` and `cve.json`:
+
+```bash
+python -m pysbomcve --gui --examples-dir "C:\path\to\examples"
+# or
+pysbomcve-gui --examples-dir "C:\path\to\examples"
+```
+
+Without this option, the GUI uses the `examples` folder next to the package.
+Relative paths are resolved from the working directory. Missing example files
+are reported without changing the existing input paths.
+
 The GUI lets you:
 
-- Select an SBOM JSON file and a CVE JSON file via file dialogs.
+- Select an SBOM JSON file and either a CVE JSON file or a folder of CVE records.
+  Directory scans read JSON files directly in the selected folder, not subfolders.
 - Scan for vulnerable components.
 - View results in three modes: **Combined** (summary + raw JSON), **Summary**, and **JSON**.
+- Click **Graphical Results...** after scanning to open a separate graph window.
+  Each affected item connects to its matching CVEs and to every ancestor path
+  (immediate parent through root), with named nodes for each SBOM item.
+- CVE cards show the CVE ID and descriptions. Double-click a card to open its
+  complete details, including the raw CVE record, in a read-only dialog.
+- Use horizontal and vertical scrollbars for large graphs and CVE details.
+  In the graph, the mouse wheel scrolls vertically; Shift+wheel scrolls horizontally.
+- Use **Zoom in**, **Zoom out**, and **Reset zoom** in the graph window to resize
+  the graph and its labels. Drag with the left mouse button to pan, or use
+  Ctrl+mouse wheel to zoom around the pointer.
 - Save the results to a file or clear the view.
 
 The underlying matching logic is the same as the CLI; the GUI simply calls `match_sbom_cve` and formats the output for display.

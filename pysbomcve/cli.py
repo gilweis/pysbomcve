@@ -71,6 +71,17 @@ def _format_item_summary(item_dict: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _add_examples_dir_argument(parser: argparse.ArgumentParser) -> None:
+    """Add the example directory option shared by the GUI entry points."""
+    parser.add_argument(
+        "--examples-dir",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="Folder containing sbom.json and cve.json for the GUI examples button.",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the argument parser for pysbomcve CLI.
 
@@ -96,6 +107,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Launch the desktop graphical user interface (GUI).",
     )
+    _add_examples_dir_argument(parser)
     parser.add_argument(
         "--out",
         "-o",
@@ -142,8 +154,11 @@ def run_cli(args: Optional[List[str]] = None) -> int:
         # pylint: disable=import-outside-toplevel
         from pysbomcve.gui import launch_gui
 
-        launch_gui()
+        launch_gui(parsed_args.examples_dir)
         return 0
+
+    if parsed_args.examples_dir is not None:
+        parser.error("--examples-dir requires --gui")
 
     if not parsed_args.sbom or not parsed_args.cve:
         parser.error("the following arguments are required: --sbom, --cve (or use --gui)")
