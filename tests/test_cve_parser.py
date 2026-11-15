@@ -90,3 +90,18 @@ def test_parse_cve_file_not_found() -> None:
     """Test FileNotFoundError when pointing to a non-existent file."""
     with pytest.raises(FileNotFoundError):
         parse_cve_records("non_existent_cve_path.json")
+
+
+def test_directory_loading_reports_progress_and_skipped_files(tmp_path: Path) -> None:
+    """Count all nested files, including malformed JSON, without losing valid CVEs."""
+    nested = tmp_path / "year" / "batch"
+    nested.mkdir(parents=True)
+    (nested / "valid.JSON").write_text(json.dumps({
+        "cveMetadata": {"cveId": "CVE-2026-1111"},
+    }), encoding="utf-8")
+    (tmp_path / "invalid.json").write_text("{bad json", encoding="utf-8")
+    progress = []
+    records = parse_cve_records(tmp_path, progress=progress.append)
+    assert [record.cve_id for record in records] == ["CVE-2026-1111"]
+    assert progress[0].startswith("Discovering")
+    assert progress[-1] == "Reading CVE files: 2/2; 1 records loaded, 1 files skipped..."

@@ -4,12 +4,14 @@ import json
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Tuple
 from unittest.mock import patch
 import pytest
 
-from pysbomcve.graph_view import ResultsGraphWindow
+from pysbomcve.graph_view import ResultsGraphWindow, SBOMTreeWindow, _display_name
 from pysbomcve.gui import SBOMCVEApp
+from pysbomcve.sbom_parser import parse_sbom
+from tests.gui_helpers import destroy_root, run_scan_and_wait
 
 
 @pytest.fixture(name="tk_app")
@@ -19,7 +21,7 @@ def fixture_tk_app():
     root.withdraw()
     app = SBOMCVEApp(root)
     yield app
-    root.destroy()
+    destroy_root(root)
 
 
 def _graph_zoom_buttons(graph: tk.Toplevel) -> Dict[str, ttk.Button]:
@@ -49,6 +51,50 @@ def _scrollable_graph(app: SBOMCVEApp) -> ResultsGraphWindow:
     graph.canvas.yview_moveto(0.3)
     graph.update()
     return graph
+
+
+def _tree_rectangle(tree: SBOMTreeWindow, tag: str) -> int:
+    """Find the rectangle of a tree component."""
+    return next(
+        node for node in tree.canvas.find_withtag(tag)
+        if tree.canvas.type(node) == "rectangle"
+    )
+
+
+def _tree_edge(tree: SBOMTreeWindow, parent: str, child: str) -> int:
+    """Find the arrow connecting two component cards."""
+    source = tree.canvas.coords(_tree_rectangle(tree, parent))
+    target = tree.canvas.coords(_tree_rectangle(tree, child))
+    start_x = source[2] if target[0] > source[0] else source[0]
+    end_x = target[0] if target[0] > source[0] else target[2]
+    expected = [start_x, (source[1] + source[3]) / 2,
+                end_x, (target[1] + target[3]) / 2]
+    return next(
+        node for node in tree.canvas.find_withtag("edge")
+        if tree.canvas.coords(node) == pytest.approx(expected)
+    )
+
+
+def _dialog_details(dialog: tk.Toplevel) -> Dict[str, Any]:
+    """Read the JSON displayed in an item-details dialog."""
+    text = next(
+        widget for frame in dialog.winfo_children() for widget in frame.winfo_children()
+        if isinstance(widget, tk.Text)
+    )
+    return json.loads(text.get("1.0", tk.END))
+
+
+def _click_tree_component(tree: SBOMTreeWindow, tag: str, timestamp: int) -> None:
+    """Click a component currently in the viewport."""
+    canvas = tree.canvas
+    left, top = canvas.coords(_tree_rectangle(tree, tag))[:2]
+    x = int(left + 15 - canvas.canvasx(0))
+    y = int(top + 15 - canvas.canvasy(0))
+    assert 0 <= x < canvas.winfo_width() and 0 <= y < canvas.winfo_height()
+    canvas.event_generate("<Motion>", x=x, y=y)
+    canvas.event_generate("<ButtonPress-1>", x=x, y=y, time=timestamp)
+    canvas.event_generate("<ButtonRelease-1>", x=x, y=y, time=timestamp + 10)
+    tree.update()
 
 
 def test_gui_initial_state(tk_app: SBOMCVEApp) -> None:
@@ -82,11 +128,11 @@ def test_gui_custom_examples_dir(tmp_path: Path) -> None:
         app.load_example_files()
         assert app.sbom_path_var.get() == str(examples_dir / "sbom.json")
         assert app.cve_path_var.get() == str(examples_dir / "cve.json")
-        app.run_scan()
+        run_scan_and_wait(app)
         assert app.last_results is not None
         assert len(app.last_results) == 2
     finally:
-        root.destroy()
+        destroy_root(root)
 
 
 @pytest.mark.parametrize("missing_name", ["sbom.json", "cve.json"])
@@ -108,19 +154,20 @@ def test_gui_examples_dir_missing_file(tmp_path: Path, missing_name: str) -> Non
         assert app.cve_path_var.get() == "previous-cve"
         assert "not found" in app.status_var.get().lower()
     finally:
-        root.destroy()
+        destroy_root(root)
 
 
 def test_gui_selects_cve_directory_and_scans(
     tk_app: SBOMCVEApp, tmp_path: Path
 ) -> None:
-    """Select a folder using the button and scan all its CVE files."""
+    """Select a folder using the button and scan CVE files in all its subfolders."""
     cve_dir = tmp_path / "CVE records"
-    cve_dir.mkdir()
     project_examples = Path(__file__).resolve().parent.parent / "examples"
     cves = json.loads((project_examples / "cve.json").read_text(encoding="utf-8"))
     for index, cve in enumerate(cves):
-        (cve_dir / f"cve-{index}.json").write_text(json.dumps(cve), encoding="utf-8")
+        nested_dir = cve_dir / f"year-{index}" / "batch"
+        nested_dir.mkdir(parents=True)
+        (nested_dir / f"cve-{index}.JSON").write_text(json.dumps(cve), encoding="utf-8")
     tk_app.sbom_path_var.set(str(project_examples / "sbom.json"))
     input_frame = next(
         child for parent in tk_app.root.winfo_children()
@@ -147,7 +194,7 @@ def test_gui_selects_cve_directory_and_scans(
         folder_button.invoke()
         assert tk_app.cve_path_var.get() == str(cve_dir)
 
-    tk_app.run_scan()
+    run_scan_and_wait(tk_app)
     assert tk_app.last_results is not None
     assert {item["cves"][0]["cveId"] for item in tk_app.last_results} == {
         "CVE-2023-32681", "CVE-2021-44228",
@@ -157,13 +204,12 @@ def test_gui_selects_cve_directory_and_scans(
 def test_gui_run_scan_and_view_modes(tk_app: SBOMCVEApp) -> None:
     """Test running a scan from the GUI and toggling display modes."""
     tk_app.load_example_files()
-    tk_app.run_scan()
+    run_scan_and_wait(tk_app)
 
     assert tk_app.last_results is not None
     assert len(tk_app.last_results) == 2
     assert "Scan Complete" in tk_app.status_var.get()
 
-    # Verify combined display content
     content_combined = tk_app.result_text.get("1.0", tk.END)
     assert "requests @ 2.28.0" in content_combined
     assert "CVE-2023-32681" in content_combined
@@ -188,20 +234,439 @@ def test_gui_run_scan_validation_missing_input(tk_app: SBOMCVEApp) -> None:
     with patch("tkinter.messagebox.showwarning") as mock_warn:
         tk_app.sbom_path_var.set("")
         tk_app.cve_path_var.set("")
-        tk_app.run_scan()
+        run_scan_and_wait(tk_app)
         mock_warn.assert_called_once()
 
 
 def test_gui_clear_all(tk_app: SBOMCVEApp) -> None:
     """Test clearing all input and text fields."""
     tk_app.load_example_files()
-    tk_app.run_scan()
+    run_scan_and_wait(tk_app)
     tk_app.clear_all()
 
     assert tk_app.sbom_path_var.get() == ""
     assert tk_app.cve_path_var.get() == ""
     assert tk_app.last_results is None
+    assert tk_app.last_sbom is None
     assert "Inputs cleared" in tk_app.result_text.get("1.0", tk.END)
+
+
+@pytest.mark.parametrize("filename", ["sbom.json", "sbom_spdx.json"])
+def test_gui_sbom_tree_button_and_scan_snapshot(
+    tk_app: SBOMCVEApp, filename: str
+) -> None:
+    """Show all items and dependencies from either format, not changed input paths."""
+    examples = Path(__file__).resolve().parent.parent / "examples"
+    tk_app.sbom_path_var.set(str(examples / filename))
+    tk_app.cve_path_var.set(str(examples / "cve.json"))
+    run_scan_and_wait(tk_app)
+    sbom = tk_app.last_sbom
+    assert sbom is not None
+    tk_app.sbom_path_var.set("a different input that does not exist.json")
+    button = next(
+        widget
+        for parent in tk_app.root.winfo_children()
+        for frame in parent.winfo_children()
+        for widget in frame.winfo_children()
+        if isinstance(widget, ttk.Button) and widget.cget("text") == "SBOM Tree..."
+    )
+    with patch("tkinter.messagebox.showwarning") as warning:
+        button.invoke()
+    warning.assert_not_called()
+    tree = next(
+        child for child in tk_app.root.winfo_children()
+        if isinstance(child, SBOMTreeWindow)
+    )
+    labels = [
+        tree.canvas.itemcget(node, "text")
+        for node in tree.canvas.find_withtag("node")
+        if tree.canvas.type(node) == "text"
+    ]
+    assert len(labels) == len(sbom.components)
+    for c in sbom.components.values():
+        assert any(label.split("\n")[0] == _display_name(c.raw_data, c.name) for label in labels)
+    assert len(tree.canvas.find_withtag("edge")) == sum(
+        len(component.parent_ids.intersection(sbom.components))
+        for component in sbom.components.values()
+    )
+    assert any("CVE-2023-32681" in label for label in labels)
+    assert any("payment-gateway-client" in label and "CVE-" not in label for label in labels)
+
+
+@pytest.mark.parametrize("filename", ["sbom.json", "sbom_spdx.json"])
+def test_gui_sbom_tree_before_scan(tk_app: SBOMCVEApp, filename: str) -> None:
+    """Render the selected SBOM without CVE input, clearly marked as unscanned."""
+    examples = Path(__file__).resolve().parent.parent / "examples"
+    sbom_path = examples / filename
+    tk_app.sbom_path_var.set(str(sbom_path))
+    button = next(
+        widget
+        for parent in tk_app.root.winfo_children()
+        for frame in parent.winfo_children()
+        for widget in frame.winfo_children()
+        if isinstance(widget, ttk.Button) and widget.cget("text") == "SBOM Tree..."
+    )
+    with patch("tkinter.messagebox.showwarning") as warning, patch(
+        "tkinter.messagebox.showinfo"
+    ) as info:
+        button.invoke()
+    warning.assert_called_once()
+    assert "not" in warning.call_args.args[1].lower()
+    assert "scan" in warning.call_args.args[1].lower()
+    info.assert_not_called()
+    tree = next(
+        child for child in tk_app.root.winfo_children()
+        if isinstance(child, SBOMTreeWindow)
+    )
+    labels = [
+        tree.canvas.itemcget(node, "text")
+        for node in tree.canvas.find_withtag("node")
+        if tree.canvas.type(node) == "text"
+    ]
+    parsed = parse_sbom(sbom_path)
+    assert len(labels) == len(parsed.components)
+    assert {label.split("\n")[0] for label in labels} == {
+        _display_name(c.raw_data, c.name) for c in parsed.components.values()
+    }
+    assert all("CVE-" not in label for label in labels)
+    assert any(
+        "not been run" in str(widget.cget("text")).lower()
+        for widget in tree.winfo_children() if isinstance(widget, ttk.Label)
+    )
+    assert tk_app.last_sbom is None
+    assert tk_app.last_results is None
+
+    dialog = tree.show_item_details("component-0")
+    details = _dialog_details(dialog)
+    assert details["item"] == next(iter(parsed.components.values())).to_dict()
+    assert details["cves"] is None
+    assert "not scanned" in details["scan_status"].lower()
+
+    tk_app.cve_path_var.set(str(examples / "cve.json"))
+    run_scan_and_wait(tk_app)
+    with patch("tkinter.messagebox.showwarning") as warning:
+        scanned_tree = tk_app.show_sbom_tree()
+    warning.assert_not_called()
+    assert scanned_tree is not None
+    assert any(
+        "CVE-2023-32681" in scanned_tree.canvas.itemcget(node, "text")
+        for node in scanned_tree.canvas.find_all()
+        if scanned_tree.canvas.type(node) == "text"
+    )
+
+
+def test_gui_sbom_tree_preview_uses_current_selection(tk_app: SBOMCVEApp) -> None:
+    """A new preview reads the currently selected file instead of an earlier preview."""
+    examples = Path(__file__).resolve().parent.parent / "examples"
+    with patch("tkinter.messagebox.showwarning") as warning:
+        tk_app.sbom_path_var.set(str(examples / "sbom.json"))
+        first = tk_app.show_sbom_tree()
+        tk_app.sbom_path_var.set(str(examples / "sbom_spdx.json"))
+        second = tk_app.show_sbom_tree()
+    assert warning.call_count == 2
+    assert first is not None and second is not None
+    first_labels = [
+        first.canvas.itemcget(node, "text") for node in first.canvas.find_all()
+        if first.canvas.type(node) == "text"
+    ]
+    second_labels = [
+        second.canvas.itemcget(node, "text") for node in second.canvas.find_all()
+        if second.canvas.type(node) == "text"
+    ]
+    assert any("log4j-core" in label for label in first_labels)
+    assert not any("log4j-core" in label for label in second_labels)
+    assert any("requests" in label for label in second_labels)
+
+
+@pytest.mark.parametrize("contents", ["{invalid json", "[]", "{}", '{"components": null}'])
+def test_gui_sbom_tree_before_scan_reports_bad_input(
+    tk_app: SBOMCVEApp, tmp_path: Path, contents: str
+) -> None:
+    """Malformed or unreadable SBOMs produce an error, never an empty tree."""
+    sbom_path = tmp_path / "invalid.json"
+    sbom_path.write_text(contents, encoding="utf-8")
+    tk_app.sbom_path_var.set(str(sbom_path))
+    with patch("tkinter.messagebox.showerror") as error, patch(
+        "tkinter.messagebox.showwarning"
+    ) as warning, patch("tkinter.messagebox.showinfo"):
+        assert tk_app.show_sbom_tree() is None
+    error.assert_called_once()
+    warning.assert_not_called()
+    assert not any(isinstance(child, SBOMTreeWindow) for child in tk_app.root.winfo_children())
+
+
+def test_gui_sbom_tree_missing_input(tk_app: SBOMCVEApp, tmp_path: Path) -> None:
+    """Prompt for an SBOM, and report a missing file before opening a tree."""
+    with patch("tkinter.messagebox.showwarning") as warning, patch(
+        "tkinter.messagebox.showinfo"
+    ):
+        assert tk_app.show_sbom_tree() is None
+    warning.assert_called_once()
+    assert "SBOM" in warning.call_args.args[1]
+    for path in (tmp_path / "missing.json", tmp_path):
+        tk_app.sbom_path_var.set(str(path))
+        with patch("tkinter.messagebox.showerror") as error, patch(
+            "tkinter.messagebox.showinfo"
+        ):
+            assert tk_app.show_sbom_tree() is None
+        error.assert_called_once()
+        assert str(path) in error.call_args.args[1]
+
+
+def test_gui_sbom_tree_allows_no_matches(tk_app: SBOMCVEApp) -> None:
+    """A completed scan with no findings is not an unscanned preview."""
+    tk_app.last_sbom = parse_sbom({"components": [{"name": "unaffected"}]})
+    tk_app.last_results = []
+    with patch("tkinter.messagebox.showwarning") as warning:
+        tree = tk_app.show_sbom_tree()
+    warning.assert_not_called()
+    assert tree is not None
+    assert any(
+        tree.canvas.itemcget(node, "text") == "unaffected"
+        for node in tree.canvas.find_all() if tree.canvas.type(node) == "text"
+    )
+    tk_app.last_sbom = parse_sbom({"components": []})
+    empty_tree = tk_app.show_sbom_tree()
+    assert empty_tree is not None
+    assert any(
+        empty_tree.canvas.itemcget(node, "text") == "No components in this SBOM."
+        for node in empty_tree.canvas.find_all() if empty_tree.canvas.type(node) == "text"
+    )
+    tk_app.clear_all()
+    with patch("tkinter.messagebox.showwarning"):
+        assert tk_app.show_sbom_tree() is None
+
+
+def test_gui_sbom_tree_shared_dependencies_cycles_and_highlights(
+    tk_app: SBOMCVEApp, tmp_path: Path
+) -> None:
+    """Preserve every edge and highlight only the affected version with all CVE IDs."""
+    data = {
+        "components": [
+            {"bom-ref": "root", "name": "root"},
+            {"bom-ref": "parent", "name": "parent"},
+            {"bom-ref": "old", "name": "requests", "version": "2.28.0",
+             "properties": [{"name": "extra", "value": "complete details"}]},
+            {"bom-ref": "new", "name": "requests", "version": "2.32.0"},
+            {"bom-ref": "cycle-a", "name": "cycle-a"},
+            {"bom-ref": "cycle-b", "name": "cycle-b"},
+            {"bom-ref": "orphan", "name": "orphan"},
+        ],
+        "dependencies": [
+            {"ref": "root", "dependsOn": ["parent", "old", "new"]},
+            {"ref": "parent", "dependsOn": ["old"]},
+            {"ref": "cycle-a", "dependsOn": ["cycle-b"]},
+            {"ref": "cycle-b", "dependsOn": ["cycle-a"]},
+        ],
+    }
+    (tmp_path / "sbom.json").write_text(json.dumps(data), encoding="utf-8")
+    examples = Path(__file__).resolve().parent.parent / "examples"
+    cves = json.loads((examples / "cve.json").read_text(encoding="utf-8"))
+    cves.append(json.loads(json.dumps(cves[0])))
+    cves[-1]["cveMetadata"]["cveId"] = "CVE-2026-9999"
+    (tmp_path / "cves.json").write_text(json.dumps(cves), encoding="utf-8")
+    tk_app.sbom_path_var.set(str(tmp_path / "sbom.json"))
+    tk_app.cve_path_var.set(str(tmp_path / "cves.json"))
+    run_scan_and_wait(tk_app)
+    tree = tk_app.show_sbom_tree()
+    assert tree is not None
+    assert tk_app.last_results is not None
+    assert len(tk_app.last_results) == 1
+    labels = {}
+    colors = {}
+    for index, component in enumerate(data["components"]):
+        nodes = tree.canvas.find_withtag(f"component-{index}")
+        text = next(node for node in nodes if tree.canvas.type(node) == "text")
+        rectangle = next(node for node in nodes if tree.canvas.type(node) == "rectangle")
+        labels[component["bom-ref"]] = tree.canvas.itemcget(text, "text")
+        colors[component["bom-ref"]] = tree.canvas.itemcget(rectangle, "fill")
+    assert len(tree.canvas.find_withtag("node")) == 2 * len(data["components"])
+    assert len(tree.canvas.find_withtag("edge")) == 6
+    assert "CVE-2023-32681" in labels["old"] and "CVE-2026-9999" in labels["old"]
+    assert "CVE-" not in labels["new"]
+    assert colors["old"] != colors["new"]
+    assert len({color for cid, color in colors.items() if cid != "old"}) == 1
+    dialog = tree.show_item_details("component-2")
+    text = next(
+        widget for frame in dialog.winfo_children() for widget in frame.winfo_children()
+        if isinstance(widget, tk.Text)
+    )
+    details = json.loads(text.get("1.0", tk.END))
+    assert details["item"] == data["components"][2]
+    assert details["cves"] == tk_app.last_results[0]["cves"]
+    assert all("rawRecord" in cve for cve in details["cves"])
+    assert text.cget("state") == tk.DISABLED
+    dialog.destroy()
+    dialog = tree.show_item_details("component-3")
+    assert _dialog_details(dialog) == {
+        "item": data["components"][3], "cves": []
+    }
+
+
+def test_gui_sbom_tree_click_double_click_and_drag_after_zoom(tk_app: SBOMCVEApp) -> None:
+    """Single-click selects, double-click opens full details, and dragging does neither."""
+    tk_app.load_example_files()
+    run_scan_and_wait(tk_app)
+    tree = tk_app.show_sbom_tree()
+    assert tree is not None
+    tree.update()
+    _graph_zoom_buttons(tree)["Zoom in"].invoke()
+    tree.canvas.xview_moveto(0)
+    tree.canvas.yview_moveto(0)
+    tree.update()
+    canvas = tree.canvas
+    tag = "component-2"
+    rectangle = _tree_rectangle(tree, tag)
+    left, top = canvas.coords(rectangle)[:2]
+    x, y = int(left + 15 - canvas.canvasx(0)), int(top + 15 - canvas.canvasy(0))
+    original_outline = canvas.itemcget(rectangle, "outline")
+    with patch.object(tree, "show_item_details", wraps=tree.show_item_details) as details:
+        _click_tree_component(tree, tag, 1000)
+        details.assert_not_called()
+        assert canvas.itemcget(rectangle, "outline") != original_outline
+        _click_tree_component(tree, tag, 1100)
+        details.assert_called_once_with(tag)
+        dialog = next(child for child in tree.winfo_children() if isinstance(child, tk.Toplevel))
+        item_details = _dialog_details(dialog)
+        assert item_details["item"]["name"] == "requests"
+        assert tk_app.last_results is not None
+        assert item_details["cves"] == next(
+            result["cves"] for result in tk_app.last_results
+            if result["item"]["name"] == "requests"
+        )
+        assert "rawRecord" in item_details["cves"][0]
+        dialog.destroy()
+        details.reset_mock()
+        canvas.event_generate("<ButtonPress-1>", x=x, y=y, time=2000)
+        canvas.event_generate("<B1-Motion>", x=x + 15, y=y + 15, time=2010)
+        canvas.event_generate("<B1-Motion>", x=x, y=y, time=2020)
+        canvas.event_generate("<ButtonRelease-1>", x=x, y=y, time=2030)
+        tree.update()
+        details.assert_not_called()
+        _click_tree_component(tree, tag, 2100)
+        details.assert_not_called()
+
+
+def test_gui_unscanned_tree_click_and_double_click(tk_app: SBOMCVEApp) -> None:
+    """Selection and item details work in the unscanned preview too."""
+    examples = Path(__file__).resolve().parent.parent / "examples"
+    tk_app.sbom_path_var.set(str(examples / "sbom.json"))
+    with patch("tkinter.messagebox.showwarning"):
+        tree = tk_app.show_sbom_tree()
+    assert tree is not None
+    tree.update()
+    rectangle = _tree_rectangle(tree, "component-0")
+    original = tree.canvas.itemcget(rectangle, "outline")
+    with patch.object(tree, "show_item_details", wraps=tree.show_item_details) as details:
+        _click_tree_component(tree, "component-0", 1000)
+        details.assert_not_called()
+        assert tree.canvas.itemcget(rectangle, "outline") != original
+        _click_tree_component(tree, "component-0", 1100)
+        details.assert_called_once_with("component-0")
+    dialog = next(child for child in tree.winfo_children() if isinstance(child, tk.Toplevel))
+    item_details = _dialog_details(dialog)
+    assert item_details["item"]["name"] == "ecommerce-platform"
+    assert item_details["cves"] is None
+    assert "not scanned" in item_details["scan_status"].lower()
+
+
+def test_gui_sbom_tree_highlights_all_paths_and_preserves_cve_colors(
+    tk_app: SBOMCVEApp,
+) -> None:
+    """Highlight all ancestors, descendants, and connecting paths but not siblings."""
+    ids = ["root", "left", "right", "target", "child", "grandchild", "sibling", "other"]
+    tk_app.last_sbom = parse_sbom({
+        "components": [{"bom-ref": cid, "name": cid} for cid in ids],
+        "dependencies": [
+            {"ref": "root", "dependsOn": ["left", "right", "sibling"]},
+            {"ref": "left", "dependsOn": ["target"]},
+            {"ref": "right", "dependsOn": ["target"]},
+            {"ref": "target", "dependsOn": ["child"]},
+            {"ref": "child", "dependsOn": ["grandchild"]},
+        ],
+    })
+    tk_app.last_results = [{
+        "item": tk_app.last_sbom.components["target"].to_dict(),
+        "cves": [{"cveId": "CVE-2026-0001"}],
+    }]
+    tree = tk_app.show_sbom_tree()
+    assert tree is not None
+    tree.update()
+    canvas = tree.canvas
+    tags = {cid: f"component-{index}" for index, cid in enumerate(ids)}
+    rectangles = {cid: _tree_rectangle(tree, tag) for cid, tag in tags.items()}
+    fills = {cid: canvas.itemcget(node, "fill") for cid, node in rectangles.items()}
+    original = canvas.itemcget(rectangles["target"], "outline")
+    original_edge = canvas.itemcget(_tree_edge(tree, tags["root"], tags["left"]), "fill")
+    _click_tree_component(tree, tags["target"], 1000)
+    outlines = {cid: canvas.itemcget(node, "outline") for cid, node in rectangles.items()}
+    assert outlines["target"] != original
+    assert outlines["root"] == outlines["left"] == outlines["right"] != original
+    assert outlines["child"] == outlines["grandchild"] != original
+    assert len({outlines["target"], outlines["root"], outlines["child"]}) == 3
+    assert outlines["sibling"] == outlines["other"] == original
+    assert fills == {cid: canvas.itemcget(node, "fill") for cid, node in rectangles.items()}
+    for parent, child in (("root", "left"), ("root", "right"),
+                          ("left", "target"), ("right", "target")):
+        assert canvas.itemcget(_tree_edge(tree, tags[parent], tags[child]), "fill") \
+            == outlines["root"]
+    for parent, child in (("target", "child"), ("child", "grandchild")):
+        assert canvas.itemcget(_tree_edge(tree, tags[parent], tags[child]), "fill") \
+            == outlines["child"]
+    assert canvas.itemcget(_tree_edge(tree, tags["root"], tags["sibling"]), "fill") \
+        == original_edge
+
+    _graph_zoom_buttons(tree)["Zoom in"].invoke()
+    tree.update()
+    for cid, tag in tags.items():
+        assert canvas.itemcget(_tree_rectangle(tree, tag), "outline") == outlines[cid]
+    assert canvas.itemcget(_tree_edge(tree, tags["right"], tags["target"]), "fill") \
+        == outlines["root"]
+    canvas.xview_moveto(0)
+    canvas.yview_moveto(0)
+    tree.update()
+    _click_tree_component(tree, tags["root"], 2500)
+    assert canvas.itemcget(_tree_rectangle(tree, tags["sibling"]), "outline") \
+        == canvas.itemcget(_tree_rectangle(tree, tags["target"]), "outline")
+    assert canvas.itemcget(_tree_rectangle(tree, tags["other"]), "outline") == original
+    canvas.event_generate("<Motion>", x=5, y=5)
+    canvas.event_generate("<ButtonPress-1>", x=5, y=5, time=4000)
+    canvas.event_generate("<ButtonRelease-1>", x=5, y=5, time=4010)
+    tree.update()
+    assert all(
+        canvas.itemcget(_tree_rectangle(tree, tag), "outline") == original
+        for tag in tags.values()
+    )
+
+
+def test_gui_sbom_tree_highlights_cycles_in_both_directions(tk_app: SBOMCVEApp) -> None:
+    """A cycle is traversed safely and marked as both ancestor and descendant."""
+    tk_app.last_sbom = parse_sbom({
+        "components": [
+            {"bom-ref": cid, "name": cid}
+            for cid in ("root", "selected", "cycle", "other")
+        ],
+        "dependencies": [
+            {"ref": "root", "dependsOn": ["selected"]},
+            {"ref": "selected", "dependsOn": ["cycle"]},
+            {"ref": "cycle", "dependsOn": ["selected"]},
+        ],
+    })
+    tk_app.last_results = []
+    tree = tk_app.show_sbom_tree()
+    assert tree is not None
+    tree.update()
+    _click_tree_component(tree, "component-1", 1000)
+    canvas = tree.canvas
+    outlines = [
+        canvas.itemcget(_tree_rectangle(tree, f"component-{index}"), "outline")
+        for index in range(4)
+    ]
+    assert len(set(outlines)) == 4
+    for parent, child in (("component-1", "component-2"), ("component-2", "component-1")):
+        assert canvas.itemcget(_tree_edge(tree, parent, child), "fill") == outlines[2]
+    assert canvas.itemcget(_tree_edge(tree, "component-0", "component-1"), "fill") \
+        == outlines[0]
 
 
 def test_gui_graph_before_scan_and_empty_results(tk_app: SBOMCVEApp) -> None:
@@ -251,8 +716,8 @@ def test_gui_graph_connects_all_paths_and_cves(tk_app: SBOMCVEApp) -> None:
     assert "root-item" in labels
     assert "parent-a" in labels and "parent-b" in labels
     assert labels.count("shared-root") == 2
-    assert "CVE-2026-0001\n\nFirst description." in labels
-    assert "CVE-2026-0002\n\nSecond description." in labels
+    assert "CVE-2026-0001 (score: N/A)\n\nFirst description." in labels
+    assert "CVE-2026-0002 (score: N/A)\n\nSecond description." in labels
     assert "No recorded ancestors." in labels
     assert len(graph.canvas.find_withtag("edge")) == 7
 

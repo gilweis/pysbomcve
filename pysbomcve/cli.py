@@ -7,12 +7,14 @@ printing human-readable and JSON results to stdout and saving results to a file.
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
-from pysbomcve.matcher import match_sbom_cve
+from pysbomcve.cve_parser import parse_cve_records
+from pysbomcve.matcher import SBOMCVEMatcher
+from pysbomcve.report import REPORT_FORMATS, render_report
+from pysbomcve.sbom_parser import parse_sbom
 
 
 def _format_cve_lines(cves: List[Dict[str, Any]]) -> List[str]:
@@ -100,7 +102,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--cve",
         default=None,
-        help="Path to the CVE JSON 5.0 file, list file, or directory.",
+        help="Path to the CVE JSON 5.0 file, list file, or directory (searched recursively).",
     )
     parser.add_argument(
         "--gui",
@@ -113,7 +115,21 @@ def build_parser() -> argparse.ArgumentParser:
         "-o",
         dest="out",
         default=None,
-        help="Path to the output JSON file where results will be saved.",
+        help="Path to the output file where the report will be saved.",
+    )
+    parser.add_argument(
+        "--outform",
+        choices=REPORT_FORMATS,
+        default="json",
+        help="Report format for --out and the printed report: json (default) or html.",
+    )
+    parser.add_argument(
+        "--short",
+        action="store_true",
+        help=(
+            "Short report: only SBOM roots and the items directly below them, each "
+            "with all CVE IDs and scores in it or below it; items without CVEs are omitted."
+        ),
     )
     parser.add_argument(
         "--indent",
@@ -136,6 +152,19 @@ def _validate_input_paths(sbom_path: Path, cve_path: Path) -> Optional[str]:
     if not cve_path.exists():
         return f"Error: CVE source not found: {cve_path}\n"
     return None
+
+
+def _scan_and_render(
+    parsed_args: argparse.Namespace, sbom_path: Path, cve_path: Path
+) -> Tuple[List[Dict[str, Any]], str]:
+    """Match the inputs and render the report selected by --outform and --short."""
+    parsed_sbom = parse_sbom(sbom_path)
+    results = SBOMCVEMatcher().match(parsed_sbom, parse_cve_records(cve_path))
+    report = render_report(
+        parsed_sbom, results, fmt=parsed_args.outform, short=parsed_args.short,
+        sbom_path=str(sbom_path), cve_path=str(cve_path), indent=parsed_args.indent,
+    )
+    return results, report
 
 
 def run_cli(args: Optional[List[str]] = None) -> int:
@@ -172,7 +201,7 @@ def run_cli(args: Optional[List[str]] = None) -> int:
         return 1
 
     try:
-        results = match_sbom_cve(sbom_path, cve_path)
+        results, report = _scan_and_render(parsed_args, sbom_path, cve_path)
     except Exception as exc:  # pylint: disable=broad-exception-caught
         sys.stderr.write(f"Error during matching: {exc}\n")
         return 1
@@ -197,10 +226,10 @@ def run_cli(args: Optional[List[str]] = None) -> int:
     else:
         print("\nNo vulnerabilities matched against the provided SBOM components.")
 
-    # Print full JSON result to console
-    print("\n--- JSON Result ---")
-    json_output = json.dumps(results, indent=parsed_args.indent)
-    print(json_output)
+    # Print the selected report to console
+    kind = "Short" if parsed_args.short else "Full"
+    print(f"\n--- {kind} {parsed_args.outform.upper()} Report ---")
+    print(report)
 
     # Save to output file if requested
     if parsed_args.out:
@@ -208,7 +237,7 @@ def run_cli(args: Optional[List[str]] = None) -> int:
         try:
             out_path.parent.mkdir(parents=True, exist_ok=True)
             with open(out_path, "w", encoding="utf-8") as out_file:
-                out_file.write(json_output)
+                out_file.write(report)
             print(f"\n[+] Results successfully saved to: {out_path.resolve()}")
         except OSError as exc:
             sys.stderr.write(f"Error writing output to {out_path}: {exc}\n")

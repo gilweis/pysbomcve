@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union
 
 
 # pylint: disable=too-few-public-methods
@@ -356,33 +356,52 @@ def parse_single_cve_dict(data: Dict[str, Any]) -> Optional[CVERecord]:
     )
 
 
-def _parse_cve_directory(dir_path: Path) -> List[CVERecord]:
-    """Parse all JSON CVE files inside a directory."""
+def _parse_cve_directory(
+    dir_path: Path, progress: Optional[Callable[[str], None]]
+) -> List[CVERecord]:
+    """Parse all JSON CVE files inside a directory and its subdirectories."""
     records: List[CVERecord] = []
-    for json_file in sorted(dir_path.glob("*.json")):
+    if progress:
+        progress("Discovering CVE JSON files in folder and subfolders...")
+    json_files = sorted(
+        path for path in dir_path.rglob("*")
+        if path.suffix.lower() == ".json" and path.is_file()
+    )
+    skipped = 0
+    for completed, json_file in enumerate(json_files, 1):
         try:
             with open(json_file, "r", encoding="utf-8") as file_handle:
                 file_data = json.load(file_handle)
-            records.extend(parse_cve_records(file_data))
-        except (json.JSONDecodeError, ValueError):
-            continue
+            parsed = parse_cve_records(file_data)
+            records.extend(parsed)
+            if not parsed:
+                skipped += 1
+        except (OSError, ValueError):
+            skipped += 1
+        if progress:
+            progress(
+                f"Reading CVE files: {completed:,}/{len(json_files):,}; "
+                f"{len(records):,} records loaded, {skipped:,} files skipped..."
+            )
     return records
 
 
 def parse_cve_records(
-    cve_source: Union[str, Path, Dict[str, Any], List[Any]]
+    cve_source: Union[str, Path, Dict[str, Any], List[Any]],
+    *, progress: Optional[Callable[[str], None]] = None,
 ) -> List[CVERecord]:
     """Parse one or more CVE JSON 5.0 records from files, directories, or dicts.
 
     Supports:
     - Path to a single CVE JSON 5.0 file.
-    - Path to a directory of CVE JSON files.
+    - Path to a directory of CVE JSON files, searched recursively.
     - Dictionary representing a CVE JSON 5.0 record.
     - Dictionary with 'cves' or 'cveRecords' list.
     - List of CVE records.
 
     Args:
         cve_source: Source containing CVE data.
+        progress: Optional callback receiving file and record loading progress.
 
     Returns:
         List of parsed CVERecord instances.
@@ -396,24 +415,28 @@ def parse_cve_records(
         if not source_path.exists():
             raise FileNotFoundError(f"CVE source not found: {source_path}")
         if source_path.is_dir():
-            return _parse_cve_directory(source_path)
+            return _parse_cve_directory(source_path, progress)
+        if progress:
+            progress("Reading CVE JSON file...")
         with open(source_path, "r", encoding="utf-8") as file_handle:
             loaded_data = json.load(file_handle)
-        return parse_cve_records(loaded_data)
+        return parse_cve_records(loaded_data, progress=progress)
 
     if isinstance(cve_source, list):
         records: List[CVERecord] = []
-        for item in cve_source:
+        for completed, item in enumerate(cve_source, 1):
             if isinstance(item, dict):
                 rec = parse_single_cve_dict(item)
                 if rec:
                     records.append(rec)
+            if progress and (completed % 1000 == 0 or completed == len(cve_source)):
+                progress(f"Parsing CVE records: {completed:,}/{len(cve_source):,}...")
         return records
 
     if isinstance(cve_source, dict):
         for wrap_key in ("cves", "cveRecords", "records", "vulnerabilities"):
             if isinstance(cve_source.get(wrap_key), list):
-                return parse_cve_records(cve_source[wrap_key])
+                return parse_cve_records(cve_source[wrap_key], progress=progress)
         rec = parse_single_cve_dict(cve_source)
         return [rec] if rec else []
 

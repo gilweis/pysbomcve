@@ -15,12 +15,20 @@
   - **SPDX JSON** (v2.2, v2.3)
 - **CVE Format Supported**:
   - **CVE JSON 5.0 / 5.1** (Official [CVEProject/cvelistV5](https://github.com/CVEProject/cvelistV5) schema)
-  - Supports single CVE files, bundled CVE lists, and .directories of CVE records
+  - Supports single CVE files, bundled CVE lists, and directories of CVE records (searched recursively, including subfolders)
 - **Lineage Tracing to Root**:
   - For every vulnerable component identified, the output includes all upper items in the SBOM tree from its immediate parent up to the root application.
 - **Accurate Version & Product Matching**:
   - Evaluates SemVer, PEP 440, version ranges (`lessThan`, `lessThanOrEqual`), exact versions, wildcards (`*`), and explicit unaffected overrides.
-  - Matches across package names, products, vendors, PURLs, and CPEs.
+  - Matches across package names, products, vendors, PURLs, and CPEs. For npm
+    scoped packages (`@scope/name`, from the SBOM group or PURL namespace), a bare
+    CVE product or CPE product name only matches when the CVE vendor is absent or
+    corresponds to the scope, so `@angular/build` does not match SUSE's `build`;
+    a CVE package name of `@scope/name` always matches. Other groups, such as Maven
+    namespaces, are not treated as vendors.
+  - Product names match only when they equal the item or PURL name exactly
+    (ignoring case and `_`/`-`): CVE product `log4j` does not match `log4j-core`,
+    and product `Controller` does not match `abort-controller`.
 - **GUI-Ready Architecture**:
   - Clean separation between core matching algorithms, parsers, and presentation logic, making it trivial to integrate with future desktop GUIs (Tkinter, PyQt) or web frontends.
 - **Strict Quality**:
@@ -64,7 +72,9 @@ python -m pysbomcve --sbom <path-to-sbom.json> --cve <path-to-cve.json> [--out <
 | `--cve` | | CLI mode | Path to the CVE JSON 5.0 file, directory, or array file. |
 | `--gui` | | No | Launch the desktop GUI instead of CLI matching. |
 | `--examples-dir` | | No | Folder for the GUI's example files; requires `--gui`. |
-| `--out` | `-o` | No | Path to the output JSON file to save the scan results. |
+| `--out` | `-o` | No | Path to the output file to save the report. |
+| `--outform` | | No | Report format: `json` (default) or `html`. Used for `--out` and the printed report. |
+| `--short` | | No | Short report: only SBOM roots and the items directly below them, each listing every CVE ID and score found in that item or anywhere below it. Items with no CVEs on or below them are omitted. |
 | `--indent` | | No | JSON indentation level for console/file output (default: `2`). |
 | `--fail-on-cve` | | No | Exits with status code `1` if any vulnerabilities are found (useful in CI/CD). |
 
@@ -74,7 +84,15 @@ Run using the provided real-world examples:
 
 ```bash
 python -m pysbomcve --sbom examples/sbom.json --cve examples/cve.json -o results.json
+# Short HTML report
+python -m pysbomcve --sbom examples/sbom.json --cve examples/cve.json --short --outform html -o report.html
 ```
+
+The full JSON report is the list of vulnerable items with their complete CVE
+records and paths to the root. The short JSON report is a list of roots, each
+with `id`, `name` (`group/name` when the item has a group), `version`, `cves`
+(`cveId`, `score`, `severity`, deduplicated and sorted by descending score), and
+`children` with the same fields.
 
 ---
 
@@ -105,14 +123,56 @@ are reported without changing the existing input paths.
 The GUI lets you:
 
 - Select an SBOM JSON file and either a CVE JSON file or a folder of CVE records.
-  Directory scans read JSON files directly in the selected folder, not subfolders.
-- Scan for vulnerable components.
+  Directory scans read every `.json` file in the selected folder and all its subfolders;
+  files that are not valid CVE JSON are skipped.
+- Scan for vulnerable components without blocking the GUI. An animated activity
+  bar and elapsed-time status show SBOM loading, CVE file/record counts, indexing,
+  component matching, and result preparation. Scan/input actions are temporarily
+  disabled to prevent overlapping scans or changing inputs mid-scan. Failures
+  are reported and leave the previous successful results available.
+- Loaded CVE records are kept in memory and reused by later scans of the same CVE
+  path, so changing only the SBOM does not re-read the CVE files. A single CVE file
+  is re-read automatically if it changes; after changing files in a CVE folder,
+  click **Reload CVEs + Scan**.
 - View results in three modes: **Combined** (summary + raw JSON), **Summary**, and **JSON**.
+- Click **Export Report...** after scanning to save the same report as the CLI:
+  choose **Full** or **Short** and **JSON** or **HTML**, then pick the file.
 - Click **Graphical Results...** after scanning to open a separate graph window.
   Each affected item connects to its matching CVEs and to every ancestor path
   (immediate parent through root), with named nodes for each SBOM item.
-- CVE cards show the CVE ID and descriptions. Double-click a card to open its
-  complete details, including the raw CVE record, in a read-only dialog.
+- CVE cards show the CVE ID, score, severity, and descriptions. Double-click a
+  card to open its complete details, including the raw CVE record, in a read-only dialog.
+- Both graphs have an optional inclusive **CVSS score range** filter. Enter a
+  minimum and/or maximum from 0 to 10 and click **Apply**; a blank bound means
+  0 or 10, respectively. CVEs without scores are hidden while filtering. Click
+  **Clear** to show all CVEs again. Filtering changes only the graph view, not
+  scan results or full item details.
+- Click **SBOM Tree...** to view every SBOM item, including items with no matched
+  CVEs. Before a scan, select an SBOM file and open the tree without a CVE input.
+  A warning and a banner indicate that the items have not been checked for CVEs;
+  item details show `null` for CVEs rather than implying there are no matches.
+  Arrows show dependencies; shared dependencies and cycles
+  are retained without duplicating items. Each item shows its name (as
+  `group/name` when the SBOM item has a group, in both graphs) and version.
+  Items with displayed CVEs are red and list their IDs and scores; other items
+  are blue, including items whose CVEs are hidden by the score filter.
+  Single-click an item to highlight all its ancestor and descendant paths. Outlines
+  and arrows show the selected item in purple, ancestors in green, descendants in
+  orange, and items in both directions (cycles) in teal. Click the background to
+  clear the selection. Double-click an item to see its complete SBOM data and all
+  complete matched CVE records in a scrollable, read-only dialog. Dragging pans
+  without opening details; highlighting remains visible when zooming.
+  After a scan, check **Show only paths with CVEs** to hide everything except items
+  on a root-to-leaf path through a vulnerable item: the vulnerable items, all their
+  ancestors and all their descendants, plus only the arrows on those paths. The
+  option uses the score-filtered CVEs, and both filters are disabled in the
+  pre-scan preview.
+  A statistics line shows the number of items, dependencies, root items, maximum
+  depth (levels in the longest dependency chain, not following cycles), items with
+  CVEs (count and percentage), and unique CVEs. CVE counts follow the score filter,
+  show "not scanned" in the preview, and the number of displayed items is added
+  while filtering hides items.
+  The tree uses the last successful scan's snapshot, even if input paths change.
 - Use horizontal and vertical scrollbars for large graphs and CVE details.
   In the graph, the mouse wheel scrolls vertically; Shift+wheel scrolls horizontally.
 - Use **Zoom in**, **Zoom out**, and **Reset zoom** in the graph window to resize
@@ -120,7 +180,13 @@ The GUI lets you:
   Ctrl+mouse wheel to zoom around the pointer.
 - Save the results to a file or clear the view.
 
-The underlying matching logic is the same as the CLI; the GUI simply calls `match_sbom_cve` and formats the output for display.
+The underlying parsing and matching logic is the same as the CLI. The GUI retains
+the parsed SBOM alongside the results to display the complete dependency tree.
+Matching indexes CVE package names, product names, and CPE products to avoid
+comparing every component with every CVE. Candidate CVEs still pass through the
+same product/vendor and version checks, preserving result order and full details.
+`parse_cve_records()` and `SBOMCVEMatcher.match()` accept an optional
+`progress=callback` keyword; the callback receives human-readable status messages.
 
 ## Python Module API Usage
 

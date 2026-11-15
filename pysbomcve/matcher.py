@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Set, Union
 from urllib.parse import unquote
 
 from pysbomcve.cve_parser import CVEAffectedProduct, CVERecord, parse_cve_records
@@ -63,6 +63,21 @@ def extract_purl_name(purl: Optional[str]) -> Optional[str]:
     return None
 
 
+def extract_purl_namespace(purl: Optional[str]) -> Optional[str]:
+    """Extract the namespace (group/scope) from a Package URL (purl).
+
+    Example:
+        'pkg:npm/%40angular/build@19.0.0' -> '@angular'
+        'pkg:pypi/requests@2.28.0' -> None
+    """
+    if not purl or not purl.startswith("pkg:"):
+        return None
+    parts = purl.split("?")[0].split("#")[0].split("/")
+    if len(parts) < 3:
+        return None
+    return unquote("/".join(parts[1:-1])) or None
+
+
 def extract_cpe_vendor_product(cpe: Optional[str]) -> tuple[Optional[str], Optional[str]]:
     """Extract vendor and product from a CPE 2.3 or 2.2 URI.
 
@@ -114,36 +129,52 @@ def _token_match(target: str, candidate: str) -> bool:
     return False
 
 
+def npm_scope(component: SBOMComponent) -> Optional[str]:
+    """Return an npm-style ``@scope`` from the group or PURL namespace, if any.
+
+    Scopes are part of an npm package's identity: ``@angular/build`` and ``build``
+    are different packages. Other namespaces, such as Maven groups, are not scopes.
+    """
+    for namespace in (component.group, extract_purl_namespace(component.purl)):
+        if namespace and namespace.startswith("@"):
+            return namespace
+    return None
+
+
+def _scope_identified(vendor: Optional[str], scope: Optional[str]) -> bool:
+    """Whether a bare product name can refer to a scoped package.
+
+    A product name alone does not identify a scoped package, so a known vendor
+    must correspond to the scope (e.g. vendor "angular" for ``@angular``).
+    """
+    if not scope or not vendor:
+        return True
+    return _token_match(normalize_identifier(vendor), normalize_identifier(scope))
+
+
 def _matches_package_or_product(
     comp_name_norm: str,
     purl_name_norm: str,
-    comp_group: Optional[str],
     affected: CVEAffectedProduct,
+    scope: Optional[str] = None,
 ) -> bool:
     """Check if component name or purl matches package_name or product in CVE."""
     # Check direct package_name match if given in CVE
     if affected.package_name:
         aff_pkg_norm = normalize_identifier(affected.package_name)
-        if aff_pkg_norm in (comp_name_norm, purl_name_norm):
+        names = (comp_name_norm, purl_name_norm)
+        if scope:
+            names += (normalize_identifier(f"{scope}/{comp_name_norm}"),)
+        if aff_pkg_norm in names:
             return True
-        if ":" in aff_pkg_norm and aff_pkg_norm.split(":")[-1] in (
-            comp_name_norm,
-            purl_name_norm,
-        ):
+        if ":" in aff_pkg_norm and aff_pkg_norm.split(":")[-1] in names:
             return True
 
-    # Check product name match
-    if affected.product:
+    # Product names must equal the item or PURL name exactly (after normalization).
+    if affected.product and _scope_identified(affected.vendor, scope):
         aff_prod_norm = normalize_identifier(affected.product)
         if aff_prod_norm in (comp_name_norm, purl_name_norm):
             return True
-        if _token_match(aff_prod_norm, comp_name_norm):
-            if not affected.vendor or not comp_group:
-                return True
-            aff_vend_norm = normalize_identifier(affected.vendor)
-            comp_grp_norm = normalize_identifier(comp_group)
-            if _token_match(aff_vend_norm, comp_grp_norm):
-                return True
 
     return False
 
@@ -153,11 +184,16 @@ def _matches_cpe(
     comp_name_norm: str,
     purl_name_norm: str,
     affected_cpes: List[str],
+    scope: Optional[str] = None,
 ) -> bool:
     """Check if component matches any CPE listed in the affected entry."""
     for aff_cpe in affected_cpes:
-        _, aff_prod = extract_cpe_vendor_product(aff_cpe)
-        if aff_prod and normalize_identifier(aff_prod) in (comp_name_norm, purl_name_norm):
+        aff_vendor, aff_prod = extract_cpe_vendor_product(aff_cpe)
+        if (
+            aff_prod
+            and normalize_identifier(aff_prod) in (comp_name_norm, purl_name_norm)
+            and _scope_identified(aff_vendor, scope)
+        ):
             return True
         if comp_cpe:
             _, comp_prod = extract_cpe_vendor_product(comp_cpe)
@@ -175,7 +211,9 @@ def does_product_match(
 ) -> bool:
     """Check if an SBOM component matches an affected product entry in a CVE.
 
-    Compares package names, products, vendors, PURLs, and CPEs.
+    Compares package names, products, vendors, PURLs, and CPEs. For npm scoped
+    packages, a bare product name only matches when the CVE vendor (if any)
+    corresponds to the scope; ``@scope/name`` package names always match.
 
     Args:
         component: SBOMComponent from the parsed SBOM.
@@ -187,18 +225,57 @@ def does_product_match(
     comp_name_norm = normalize_identifier(component.name)
     purl_name = extract_purl_name(component.purl)
     purl_name_norm = normalize_identifier(purl_name) if purl_name else ""
+    scope = npm_scope(component)
 
     if _matches_package_or_product(
-        comp_name_norm, purl_name_norm, component.group, affected
+        comp_name_norm, purl_name_norm, affected, scope
     ):
         return True
 
     if affected.cpes and _matches_cpe(
-        component.cpe, comp_name_norm, purl_name_norm, affected.cpes
+        component.cpe, comp_name_norm, purl_name_norm, affected.cpes, scope
     ):
         return True
 
     return False
+
+
+class _CVEIndex:
+    """Select candidates by exact package, product, and CPE names."""
+
+    # pylint: disable=too-few-public-methods
+    def __init__(
+        self, records: List[CVERecord], progress: Optional[Callable[[str], None]]
+    ) -> None:
+        self._names: Dict[str, Set[int]] = {}
+        for index, record in enumerate(records):
+            for affected in record.affected:
+                self._add_name(affected.package_name, index)
+                self._add_name(affected.product, index)
+                if affected.package_name and ":" in affected.package_name:
+                    self._add_name(normalize_identifier(affected.package_name).split(":")[-1],
+                                   index)
+                for cpe in affected.cpes:
+                    self._add_name(extract_cpe_vendor_product(cpe)[1], index)
+            if progress and ((index + 1) % 1000 == 0 or index + 1 == len(records)):
+                progress(f"Indexing CVEs: {index + 1:,}/{len(records):,} records...")
+
+    def _add_name(self, name: Optional[str], index: int) -> None:
+        if name is not None:
+            self._names.setdefault(normalize_identifier(name), set()).add(index)
+
+    def candidates(self, component: SBOMComponent) -> List[int]:
+        """Return candidate positions in the original CVE order."""
+        name = normalize_identifier(component.name)
+        candidates: Set[int] = set()
+        scope = npm_scope(component)
+        for key in (
+            name, normalize_identifier(extract_purl_name(component.purl)),
+            normalize_identifier(extract_cpe_vendor_product(component.cpe)[1]),
+            normalize_identifier(f"{scope}/{name}") if scope else "",
+        ):
+            candidates.update(self._names.get(key, ()))
+        return sorted(candidates)
 
 
 class SBOMCVEMatcher:
@@ -233,7 +310,8 @@ class SBOMCVEMatcher:
         return matching_cves
 
     def match(
-        self, parsed_sbom: ParsedSBOM, cve_records: List[CVERecord]
+        self, parsed_sbom: ParsedSBOM, cve_records: List[CVERecord],
+        *, progress: Optional[Callable[[str], None]] = None,
     ) -> List[Dict[str, Any]]:
         """Find all SBOM components that have one or more matching CVEs.
 
@@ -245,14 +323,21 @@ class SBOMCVEMatcher:
         Args:
             parsed_sbom: ParsedSBOM instance containing components and dependency graph.
             cve_records: List of parsed CVERecord instances.
+            progress: Optional callback receiving indexing and component progress.
 
         Returns:
             List of matching item dictionaries.
         """
         results: List[Dict[str, Any]] = []
-
-        for cid, comp in parsed_sbom.components.items():
-            matching_cves = self.match_component(comp, cve_records)
+        if progress:
+            progress(f"Indexing {len(cve_records):,} CVE records...")
+        index = _CVEIndex(cve_records, progress)
+        total = len(parsed_sbom.components)
+        for completed, (cid, comp) in enumerate(parsed_sbom.components.items(), 1):
+            if progress:
+                progress(f"Matching components: {completed:,}/{total:,}...")
+            candidates = [cve_records[position] for position in index.candidates(comp)]
+            matching_cves = self.match_component(comp, candidates)
             if matching_cves:
                 upper_items = parsed_sbom.get_upper_items(cid)
                 lineage_paths = parsed_sbom.get_lineage_paths(cid)
