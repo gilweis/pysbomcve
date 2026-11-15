@@ -7,6 +7,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from pysbomcve.report import sbom_max_depth
 from pysbomcve.sbom_parser import ParsedSBOM
 
 _DEFAULT_COLOR = "#64748b"
@@ -496,28 +497,7 @@ class SBOMTreeWindow(ResultsGraphWindow):
 
     def max_depth(self) -> int:
         """Return the number of levels in the longest acyclic dependency chain."""
-        depth: Dict[str, int] = {}
-        on_stack: Set[str] = set()
-        starts = [cid for cid in self._sbom.components if cid in self._sbom.root_ids]
-        for start in starts + list(self._sbom.components):
-            if start in depth:
-                continue
-            on_stack.add(start)
-            stack = [(start, iter(self._children[start]))]
-            while stack:
-                cid, pending = stack[-1]
-                child = next(pending, None)
-                if child is None:
-                    stack.pop()
-                    on_stack.discard(cid)
-                    # Edges back into the current chain form cycles and are not followed.
-                    depth[cid] = 1 + max(
-                        (depth[c] for c in self._children[cid] if c in depth), default=0
-                    )
-                elif child not in depth and child not in on_stack:
-                    on_stack.add(child)
-                    stack.append((child, iter(self._children[child])))
-        return max(depth.values(), default=0)
+        return sbom_max_depth(self._sbom)
 
     def statistics(self) -> Dict[str, Any]:
         """Summarize the SBOM structure and, after a scan, its vulnerable items."""

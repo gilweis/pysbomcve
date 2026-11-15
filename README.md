@@ -74,7 +74,8 @@ python -m pysbomcve --sbom <path-to-sbom.json> --cve <path-to-cve.json> [--out <
 | `--examples-dir` | | No | Folder for the GUI's example files; requires `--gui`. |
 | `--out` | `-o` | No | Path to the output file to save the report. |
 | `--outform` | | No | Report format: `json` (default) or `html`. Used for `--out` and the printed report. |
-| `--short` | | No | Short report: only SBOM roots and the items directly below them, each listing every CVE ID and score found in that item or anywhere below it. Items with no CVEs on or below them are omitted. |
+| `--short` | | No | Short report: only the top levels of the SBOM tree (see `--depth`), each item listing every CVE ID and score found in that item or anywhere below it. Items with no CVEs on or below them are omitted. |
+| `--depth` | | No | Number of tree levels in the short report, from `1` (roots only) to the SBOM's maximum depth. Default `2`: the roots and the items directly below them. Requires `--short`. |
 | `--indent` | | No | JSON indentation level for console/file output (default: `2`). |
 | `--fail-on-cve` | | No | Exits with status code `1` if any vulnerabilities are found (useful in CI/CD). |
 
@@ -86,16 +87,21 @@ Run using the provided real-world examples:
 python -m pysbomcve --sbom examples/sbom.json --cve examples/cve.json -o results.json
 # Short HTML report
 python -m pysbomcve --sbom examples/sbom.json --cve examples/cve.json --short --outform html -o report.html
+# Short JSON report with three tree levels
+python -m pysbomcve --sbom examples/sbom.json --cve examples/cve.json --short --depth 3 -o short.json
 ```
 
 Every report records when it was generated (local time with UTC offset), shown
 at the top of HTML reports. JSON reports are an object:
 `{"generatedAt": "2026-11-15T16:05:09+02:00", "report": "full" | "short", "sbom": ..., "cve": ..., "items": [...]}`.
 For a full report, `items` is the list of vulnerable items with their complete CVE
-records and paths to the root. For a short report, `items` is a list of roots, each
-with `id`, `name` (`group/name` when the item has a group), `version`, `cves`
-(`cveId`, `score`, `severity`, deduplicated and sorted by descending score), and
-`children` with the same fields.
+records and paths to the root. A short report also records `depth`, and `items`
+is a list of roots, each with `id`, `name` (`group/name` when the item has a
+group), `version`, `cves` (`cveId`, `score`, `severity`, deduplicated and sorted
+by descending score), and, when items with CVEs are listed below it, `children`
+with the same fields.
+An item shared by several parents appears under each of them; dependency cycles
+stop at the repeated item.
 
 ---
 
@@ -139,7 +145,9 @@ The GUI lets you:
   click **Reload CVEs + Scan**.
 - View results in three modes: **Combined** (summary + raw JSON), **Summary**, and **JSON**.
 - Click **Export Report...** after scanning to save the same report as the CLI:
-  choose **Full** or **Short** and **JSON** or **HTML**, then pick the file.
+  choose **Full** or **Short** and **JSON** or **HTML**, then pick the file. For a
+  short report, set **Depth** from 1 (roots only) to the scanned SBOM's maximum
+  depth; the default is 2.
 - Click **Graphical Results...** after scanning to open a separate graph window.
   Each affected item connects to its matching CVEs and to every ancestor path
   (immediate parent through root), with named nodes for each SBOM item.

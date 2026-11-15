@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from pysbomcve.cve_parser import parse_cve_records
 from pysbomcve.matcher import SBOMCVEMatcher
-from pysbomcve.report import REPORT_FORMATS, render_report
+from pysbomcve.report import REPORT_FORMATS, render_report, sbom_max_depth
 from pysbomcve.sbom_parser import parse_sbom
 
 
@@ -127,8 +127,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--short",
         action="store_true",
         help=(
-            "Short report: only SBOM roots and the items directly below them, each "
+            "Short report: only the top SBOM tree levels (see --depth), each item "
             "with all CVE IDs and scores in it or below it; items without CVEs are omitted."
+        ),
+    )
+    parser.add_argument(
+        "--depth",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Tree levels in the short report, from 1 (roots only) to the SBOM's "
+            "maximum depth (default: 2, roots and the items directly below them). "
+            "Requires --short."
         ),
     )
     parser.add_argument(
@@ -154,17 +165,40 @@ def _validate_input_paths(sbom_path: Path, cve_path: Path) -> Optional[str]:
     return None
 
 
+class _DepthError(ValueError):
+    """The requested short-report depth is outside the SBOM's levels."""
+
+
 def _scan_and_render(
     parsed_args: argparse.Namespace, sbom_path: Path, cve_path: Path
 ) -> Tuple[List[Dict[str, Any]], str]:
     """Match the inputs and render the report selected by --outform and --short."""
     parsed_sbom = parse_sbom(sbom_path)
+    depth = 2 if parsed_args.depth is None else parsed_args.depth
+    if parsed_args.short:
+        # Check before the potentially slow CVE loading.
+        max_depth = max(sbom_max_depth(parsed_sbom), 1)
+        if not 1 <= depth <= max_depth:
+            raise _DepthError(
+                f"--depth must be from 1 to {max_depth} (the SBOM's maximum depth)"
+            )
     results = SBOMCVEMatcher().match(parsed_sbom, parse_cve_records(cve_path))
     report = render_report(
         parsed_sbom, results, fmt=parsed_args.outform, short=parsed_args.short,
         sbom_path=str(sbom_path), cve_path=str(cve_path), indent=parsed_args.indent,
+        depth=depth,
     )
     return results, report
+
+
+def _check_cli_args(parser: argparse.ArgumentParser, parsed_args: argparse.Namespace) -> None:
+    """Reject option combinations that only apply to other modes (exits on error)."""
+    if parsed_args.examples_dir is not None:
+        parser.error("--examples-dir requires --gui")
+    if parsed_args.depth is not None and not parsed_args.short:
+        parser.error("--depth requires --short")
+    if not parsed_args.sbom or not parsed_args.cve:
+        parser.error("the following arguments are required: --sbom, --cve (or use --gui)")
 
 
 def run_cli(args: Optional[List[str]] = None) -> int:
@@ -186,12 +220,7 @@ def run_cli(args: Optional[List[str]] = None) -> int:
         launch_gui(parsed_args.examples_dir)
         return 0
 
-    if parsed_args.examples_dir is not None:
-        parser.error("--examples-dir requires --gui")
-
-    if not parsed_args.sbom or not parsed_args.cve:
-        parser.error("the following arguments are required: --sbom, --cve (or use --gui)")
-
+    _check_cli_args(parser, parsed_args)
     sbom_path = Path(parsed_args.sbom)
     cve_path = Path(parsed_args.cve)
 
@@ -203,7 +232,9 @@ def run_cli(args: Optional[List[str]] = None) -> int:
     try:
         results, report = _scan_and_render(parsed_args, sbom_path, cve_path)
     except Exception as exc:  # pylint: disable=broad-exception-caught
-        sys.stderr.write(f"Error during matching: {exc}\n")
+        sys.stderr.write(
+            f"{'Error' if isinstance(exc, _DepthError) else 'Error during matching'}: {exc}\n"
+        )
         return 1
 
     total_vulns = sum(len(item.get("cves", [])) for item in results)

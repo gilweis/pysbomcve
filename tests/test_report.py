@@ -5,13 +5,14 @@ import json
 from pathlib import Path
 import re
 import tkinter as tk
+from tkinter import ttk
 from unittest.mock import patch
 
 import pytest
 
 from pysbomcve.cli import run_cli
 from pysbomcve.gui import SBOMCVEApp
-from pysbomcve.report import build_short_report, render_report
+from pysbomcve.report import build_short_report, render_report, sbom_max_depth
 from pysbomcve.sbom_parser import parse_sbom
 from tests.gui_helpers import destroy_root, run_scan_and_wait
 
@@ -55,6 +56,48 @@ def test_short_report_lists_roots_and_children_with_cves_below() -> None:
     assert not build_short_report(sbom, [])
 
 
+def test_short_report_depth() -> None:
+    """Depth 1 lists roots only; deeper levels nest children; depth must be >= 1."""
+    sbom, results = _sbom_and_results()
+    assert sbom_max_depth(sbom) == 4
+    roots = build_short_report(sbom, results, depth=1)
+    assert [root["id"] for root in roots] == ["root", "x"]
+    assert all("children" not in root for root in roots)
+
+    def ids(items):
+        return [(item["id"], ids(item.get("children", []))) for item in items]
+
+    assert ids(build_short_report(sbom, results, depth=4)) == [
+        ("root", [("a", [("vuln", [("child", [])])])]),
+        ("x", [("child", [])]),
+    ]
+    assert build_short_report(sbom, results, depth=9) == build_short_report(
+        sbom, results, depth=4)
+    deepest = build_short_report(sbom, results, depth=4)[0]["children"][0]["children"][0]
+    assert deepest["cves"] == build_short_report(sbom, results)[0]["cves"]
+    assert "children" not in deepest["children"][0]
+    with pytest.raises(ValueError):
+        build_short_report(sbom, results, depth=0)
+    html = render_report(sbom, results, fmt="html", short=True, depth=3)
+    assert "Depth: 3 level(s)" in html and "<td>3</td>" in html and "<td>4</td>" not in html
+    assert json.loads(render_report(sbom, results, short=True, depth=3))["depth"] == 3
+
+
+def test_short_report_depth_handles_cycles() -> None:
+    """Dependency cycles stop at the repeated item instead of recursing forever."""
+    sbom = parse_sbom({
+        "components": [{"bom-ref": cid, "name": cid} for cid in ("r", "p", "q")],
+        "dependencies": [
+            {"ref": "r", "dependsOn": ["p"]}, {"ref": "p", "dependsOn": ["q"]},
+            {"ref": "q", "dependsOn": ["p"]},
+        ],
+    })
+    results = [{"item": sbom.components["q"].to_dict(), "cves": [{"cveId": "CVE-q"}]}]
+    report = build_short_report(sbom, results, depth=10)
+    assert report[0]["children"][0]["children"][0]["id"] == "q"
+    assert "children" not in report[0]["children"][0]["children"][0]
+
+
 def test_html_reports_escape_sbom_text() -> None:
     """HTML reports include CVE scores and escape untrusted SBOM/CVE text."""
     sbom, results = _sbom_and_results()
@@ -77,7 +120,7 @@ def test_reports_include_generation_time_and_sources() -> None:
     data = json.loads(render_report(sbom, results, short=True, sbom_path="s.json",
                                     cve_path="cves", generated_at=when))
     assert data == {
-        "generatedAt": "2026-11-15T16:05:09+02:00", "report": "short",
+        "generatedAt": "2026-11-15T16:05:09+02:00", "report": "short", "depth": 2,
         "sbom": "s.json", "cve": "cves", "items": build_short_report(sbom, results),
     }
     page = render_report(sbom, results, fmt="html", generated_at=when)
@@ -101,6 +144,24 @@ def test_cli_outform_and_short(tmp_path: Path, extra, check) -> None:
     assert check(out_file.read_text("utf-8"))
 
 
+def test_cli_depth(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """--depth sets the short report levels, within 1..max depth, and needs --short."""
+    base = ["--sbom", "examples/sbom.json", "--cve", "examples/cve.json"]
+    out_file = tmp_path / "short.json"
+    assert run_cli([*base, "--short", "--depth", "1", "--out", str(out_file)]) == 0
+    data = json.loads(out_file.read_text("utf-8"))
+    assert data["depth"] == 1 and all("children" not in root for root in data["items"])
+    capsys.readouterr()
+    for depth in ("0", "99"):
+        with patch("pysbomcve.cli.parse_cve_records") as load:
+            assert run_cli([*base, "--short", "--depth", depth]) == 1
+        load.assert_not_called()
+        assert "--depth must be from 1 to" in capsys.readouterr().err
+    with pytest.raises(SystemExit):
+        run_cli([*base, "--depth", "2"])
+    assert "--depth requires --short" in capsys.readouterr().err
+
+
 def test_gui_export_matches_cli_report(tmp_path: Path) -> None:
     """The GUI export writes the same report as the shared renderer."""
     root = tk.Tk()
@@ -114,17 +175,45 @@ def test_gui_export_matches_cli_report(tmp_path: Path) -> None:
             run_scan_and_wait(app)
             dialog = app.show_export_dialog()
             assert dialog is not None
+            assert app.last_sbom is not None
+            _check_depth_controls(dialog, sbom_max_depth(app.last_sbom))
             dialog.destroy()
             out_file = tmp_path / "short.html"
-            assert app.export_report(str(out_file), short=True, fmt="html")
+            assert app.export_report(str(out_file), short=True, fmt="html", depth=1)
         assert app.last_sbom is not None and app.last_results is not None
         exported = out_file.read_text("utf-8")
         stamp = re.search(r"Generated: (\S+ \S+)", exported)
         assert stamp is not None
         assert exported == render_report(
-            app.last_sbom, app.last_results, fmt="html", short=True,
+            app.last_sbom, app.last_results, fmt="html", short=True, depth=1,
             sbom_path=app.sbom_path_var.get(), cve_path=app.cve_path_var.get(),
             generated_at=datetime.strptime(stamp.group(1), "%Y-%m-%d %H:%M:%S"),
         )
     finally:
         destroy_root(root)
+
+
+def _check_depth_controls(dialog: tk.Toplevel, max_depth: int) -> None:
+    """Depth is limited to 1..max, defaults to 2, and is enabled only for Short."""
+    widgets = list(dialog.winfo_children())
+    found = []
+    while widgets:
+        widget = widgets.pop()
+        widgets.extend(widget.winfo_children())
+        found.append(widget)
+    spin = next(w for w in found if isinstance(w, ttk.Spinbox))
+    short = next(w for w in found if isinstance(w, ttk.Radiobutton)
+                 and str(w.cget("value")) == "short")
+    assert float(spin.cget("from")) == 1 and float(spin.cget("to")) == max_depth
+    assert spin.get() == str(min(2, max_depth))
+    assert str(spin.cget("state")) == tk.DISABLED
+    short.invoke()
+    assert str(spin.cget("state")) == tk.NORMAL
+    spin.set("0")
+    export = next(w for w in found if isinstance(w, ttk.Button)
+                  and w.cget("text") == "Export...")
+    with patch("tkinter.messagebox.showerror") as error, \
+            patch("tkinter.filedialog.asksaveasfilename") as ask:
+        export.invoke()
+    error.assert_called_once()
+    ask.assert_not_called()

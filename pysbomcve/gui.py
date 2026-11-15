@@ -22,7 +22,7 @@ from pysbomcve.cli import _add_examples_dir_argument, _format_item_summary
 from pysbomcve.cve_parser import CVERecord, parse_cve_records
 from pysbomcve.graph_view import ResultsGraphWindow, SBOMTreeWindow
 from pysbomcve.matcher import SBOMCVEMatcher
-from pysbomcve.report import render_report
+from pysbomcve.report import render_report, sbom_max_depth
 from pysbomcve.sbom_parser import ParsedSBOM, parse_sbom
 
 _ScanResult = Tuple[ParsedSBOM, List[Dict[str, Any]], str, List[CVERecord]]
@@ -627,17 +627,44 @@ class SBOMCVEApp:
         ttk.Radiobutton(frame, text="Full (all vulnerable items and CVE details)",
                         variable=report_var, value="full").grid(row=0, column=1, sticky=tk.W)
         ttk.Radiobutton(
-            frame, text="Short (roots and items below them, with CVE IDs and scores)",
+            frame, text="Short (top tree levels, with CVE IDs and scores in and below each item)",
             variable=report_var, value="short",
         ).grid(row=1, column=1, sticky=tk.W)
-        ttk.Label(frame, text="Format:").grid(row=2, column=0, sticky=tk.W, pady=(8, 0))
+        ttk.Label(frame, text="Format:").grid(row=3, column=0, sticky=tk.W, pady=(8, 0))
         ttk.Radiobutton(frame, text="JSON", variable=format_var, value="json").grid(
-            row=2, column=1, sticky=tk.W, pady=(8, 0))
+            row=3, column=1, sticky=tk.W, pady=(8, 0))
         ttk.Radiobutton(frame, text="HTML", variable=format_var, value="html").grid(
-            row=3, column=1, sticky=tk.W)
+            row=4, column=1, sticky=tk.W)
+
+        max_depth = max(sbom_max_depth(self.last_sbom), 1)
+        depth_var = tk.StringVar(dialog, value=str(min(2, max_depth)))
+        depth_row = ttk.Frame(frame)
+        depth_row.grid(row=2, column=1, sticky=tk.W, padx=(20, 0))
+        ttk.Label(depth_row, text="Depth:").pack(side=tk.LEFT)
+        depth_box = ttk.Spinbox(
+            depth_row, from_=1, to=max_depth, textvariable=depth_var, width=5,
+            state=tk.DISABLED,
+        )
+        depth_box.pack(side=tk.LEFT, padx=4)
+        ttk.Label(
+            depth_row, text=f"levels (1 = roots only, max {max_depth})"
+        ).pack(side=tk.LEFT)
+        report_var.trace_add("write", lambda *_: depth_box.configure(
+            state=tk.NORMAL if report_var.get() == "short" else tk.DISABLED))
 
         def export() -> None:
             fmt, short = format_var.get(), report_var.get() == "short"
+            depth = 2
+            if short:
+                try:
+                    depth = int(depth_var.get())
+                except ValueError:
+                    depth = 0
+                if not 1 <= depth <= max_depth:
+                    messagebox.showerror(
+                        "Invalid Depth", f"Enter a depth from 1 to {max_depth}.", parent=dialog
+                    )
+                    return
             out_path = filedialog.asksaveasfilename(
                 parent=dialog,
                 title="Export Report",
@@ -645,22 +672,24 @@ class SBOMCVEApp:
                 initialfile=f"pysbomcve_{'short' if short else 'full'}_report.{fmt}",
                 filetypes=[(f"{fmt.upper()} Files", f"*.{fmt}"), ("All Files", "*.*")],
             )
-            if out_path and self.export_report(out_path, short=short, fmt=fmt):
+            if out_path and self.export_report(out_path, short=short, fmt=fmt, depth=depth):
                 dialog.destroy()
 
         buttons = ttk.Frame(frame)
-        buttons.grid(row=4, column=0, columnspan=2, sticky=tk.E, pady=(12, 0))
+        buttons.grid(row=5, column=0, columnspan=2, sticky=tk.E, pady=(12, 0))
         ttk.Button(buttons, text="Export...", command=export).pack(side=tk.LEFT)
         ttk.Button(buttons, text="Cancel", command=dialog.destroy).pack(side=tk.LEFT, padx=(6, 0))
         return dialog
 
-    def export_report(self, out_path: str, *, short: bool, fmt: str) -> bool:
+    def export_report(
+        self, out_path: str, *, short: bool, fmt: str, depth: int = 2
+    ) -> bool:
         """Write the last scan as the same full/short JSON/HTML report as the CLI."""
         if self.last_results is None or self.last_sbom is None:
             messagebox.showinfo("No Scan Results", "Run a scan before exporting a report.")
             return False
         report = render_report(
-            self.last_sbom, self.last_results, fmt=fmt, short=short,
+            self.last_sbom, self.last_results, fmt=fmt, short=short, depth=depth,
             sbom_path=self.sbom_path_var.get(), cve_path=self.cve_path_var.get(),
         )
         try:
