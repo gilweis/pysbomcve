@@ -8,6 +8,7 @@ that item or anywhere below it; items with no CVEs on or below them are omitted.
 from __future__ import annotations
 
 from collections import deque
+from datetime import datetime
 from html import escape
 import json
 from typing import Any, Dict, Iterable, List, Optional
@@ -111,17 +112,18 @@ _STYLE = (
 )
 
 
-def _html_page(title: str, sbom_path: str, cve_path: str, body: List[str]) -> str:
+def _html_page(title: str, meta: Dict[str, str], body: List[str]) -> str:
     return "\n".join([
         "<!DOCTYPE html>", "<html lang=\"en\">", "<head>", "<meta charset=\"utf-8\">",
         f"<title>{escape(title)}</title>", f"<style>{_STYLE}</style>", "</head>", "<body>",
         f"<h1>{escape(title)}</h1>",
-        f"<p class=\"meta\">SBOM: {escape(sbom_path)}<br>CVE: {escape(cve_path)}</p>",
+        f"<p class=\"meta\">Generated: {escape(meta['generated'])}<br>"
+        f"SBOM: {escape(meta['sbom'])}<br>CVE: {escape(meta['cve'])}</p>",
         *body, "</body>", "</html>", "",
     ])
 
 
-def _full_html(results: List[Dict[str, Any]], sbom_path: str, cve_path: str) -> str:
+def _full_html(results: List[Dict[str, Any]], meta: Dict[str, str]) -> str:
     total = sum(len(f.get("cves", [])) for f in results)
     body = [f"<p>Vulnerable items: {len(results)} | Matching CVEs: {total}</p>"]
     if not results:
@@ -150,10 +152,10 @@ def _full_html(results: List[Dict[str, Any]], sbom_path: str, cve_path: str) -> 
             chain = [_item_name(item)] + [_item_name(parent) for parent in path]
             body.append(f"<li>{escape(' -> '.join(chain))}</li>")
         body.append("</ul>")
-    return _html_page("pysbomcve Full Report", sbom_path, cve_path, body)
+    return _html_page("pysbomcve Full Report", meta, body)
 
 
-def _short_html(short: List[Dict[str, Any]], sbom_path: str, cve_path: str) -> str:
+def _short_html(short: List[Dict[str, Any]], meta: Dict[str, str]) -> str:
     def cve_cell(cves: List[Dict[str, Any]]) -> str:
         return "<br>".join(escape(_cve_label(cve)) for cve in cves)
 
@@ -173,7 +175,7 @@ def _short_html(short: List[Dict[str, Any]], sbom_path: str, cve_path: str) -> s
                 f"<td>{cve_cell(child['cves'])}</td></tr>"
             )
         body.append("</table>")
-    return _html_page("pysbomcve Short Report", sbom_path, cve_path, body)
+    return _html_page("pysbomcve Short Report", meta, body)
 
 
 # pylint: disable=too-many-arguments
@@ -186,28 +188,39 @@ def render_report(
     sbom_path: str = "",
     cve_path: str = "",
     indent: Optional[int] = 2,
+    generated_at: Optional[datetime] = None,
 ) -> str:
     """Render the full or short report as JSON or HTML text.
+
+    JSON reports are an object with ``generatedAt`` (ISO 8601 with UTC offset),
+    ``report`` ("full" or "short"), ``sbom``, ``cve``, and ``items``: the vulnerable
+    items for a full report, or the roots for a short report.
 
     Args:
         sbom: The parsed SBOM the results were produced from.
         results: Matcher findings for the same SBOM snapshot.
         fmt: "json" or "html".
         short: Produce the short root/child CVE summary instead of all findings.
-        sbom_path: SBOM source shown in HTML reports.
-        cve_path: CVE source shown in HTML reports.
+        sbom_path: SBOM source recorded in the report.
+        cve_path: CVE source recorded in the report.
         indent: JSON indentation.
+        generated_at: Report time; defaults to the current local time.
 
     Returns:
         The report text.
     """
     if fmt not in REPORT_FORMATS:
         raise ValueError(f"Unsupported report format: {fmt}")
-    if short:
-        summary = build_short_report(sbom, results)
-        if fmt == "json":
-            return json.dumps(summary, indent=indent)
-        return _short_html(summary, sbom_path, cve_path)
+    stamp = (generated_at or datetime.now()).astimezone()
+    items = build_short_report(sbom, results) if short else results
     if fmt == "json":
-        return json.dumps(results, indent=indent)
-    return _full_html(results, sbom_path, cve_path)
+        return json.dumps({
+            "generatedAt": stamp.isoformat(timespec="seconds"),
+            "report": "short" if short else "full",
+            "sbom": sbom_path, "cve": cve_path, "items": items,
+        }, indent=indent)
+    meta = {
+        "generated": f"{stamp:%Y-%m-%d %H:%M:%S} (UTC{stamp:%z})",
+        "sbom": sbom_path, "cve": cve_path,
+    }
+    return _short_html(items, meta) if short else _full_html(items, meta)

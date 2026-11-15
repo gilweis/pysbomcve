@@ -88,8 +88,11 @@ python -m pysbomcve --sbom examples/sbom.json --cve examples/cve.json -o results
 python -m pysbomcve --sbom examples/sbom.json --cve examples/cve.json --short --outform html -o report.html
 ```
 
-The full JSON report is the list of vulnerable items with their complete CVE
-records and paths to the root. The short JSON report is a list of roots, each
+Every report records when it was generated (local time with UTC offset), shown
+at the top of HTML reports. JSON reports are an object:
+`{"generatedAt": "2026-11-15T16:05:09+02:00", "report": "full" | "short", "sbom": ..., "cve": ..., "items": [...]}`.
+For a full report, `items` is the list of vulnerable items with their complete CVE
+records and paths to the root. For a short report, `items` is a list of roots, each
 with `id`, `name` (`group/name` when the item has a group), `version`, `cves`
 (`cveId`, `score`, `severity`, deduplicated and sorted by descending score), and
 `children` with the same fields.

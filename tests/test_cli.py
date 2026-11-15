@@ -27,8 +27,8 @@ def test_cli_execution_with_out(tmp_path: Path) -> None:
 
     with open(out_file, "r", encoding="utf-8") as f:
         data = json.load(f)
-    assert isinstance(data, list)
-    assert len(data) == 2
+    assert data["report"] == "full" and data["generatedAt"]
+    assert len(data["items"]) == 2
 
 
 def test_cli_fail_on_cve() -> None:

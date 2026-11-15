@@ -1,7 +1,9 @@
 """Tests for full/short JSON/HTML reports in the CLI and GUI."""
 
+from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
+import re
 import tkinter as tk
 from unittest.mock import patch
 
@@ -68,9 +70,26 @@ def test_html_reports_escape_sbom_text() -> None:
         render_report(sbom, results, fmt="xml")
 
 
+def test_reports_include_generation_time_and_sources() -> None:
+    """JSON wraps the items with time/sources; HTML shows the time in the header."""
+    sbom, results = _sbom_and_results()
+    when = datetime(2026, 11, 15, 16, 5, 9, tzinfo=timezone(timedelta(hours=2)))
+    data = json.loads(render_report(sbom, results, short=True, sbom_path="s.json",
+                                    cve_path="cves", generated_at=when))
+    assert data == {
+        "generatedAt": "2026-11-15T16:05:09+02:00", "report": "short",
+        "sbom": "s.json", "cve": "cves", "items": build_short_report(sbom, results),
+    }
+    page = render_report(sbom, results, fmt="html", generated_at=when)
+    assert "Generated: 2026-11-15 16:05:09 (UTC+0200)" in page
+    now = datetime.fromisoformat(json.loads(render_report(sbom, results))["generatedAt"])
+    assert now.tzinfo is not None
+    assert abs((datetime.now(timezone.utc) - now).total_seconds()) < 60
+
+
 @pytest.mark.parametrize("extra,check", [
-    ([], lambda text: isinstance(json.loads(text), list) and "lineage_paths" in text),
-    (["--short"], lambda text: all("children" in root for root in json.loads(text))),
+    ([], lambda text: json.loads(text)["report"] == "full" and "lineage_paths" in text),
+    (["--short"], lambda text: all("children" in root for root in json.loads(text)["items"])),
     (["--outform", "html"], lambda text: "pysbomcve Full Report" in text),
     (["--short", "--outform", "html"], lambda text: "pysbomcve Short Report" in text),
 ])
@@ -99,9 +118,13 @@ def test_gui_export_matches_cli_report(tmp_path: Path) -> None:
             out_file = tmp_path / "short.html"
             assert app.export_report(str(out_file), short=True, fmt="html")
         assert app.last_sbom is not None and app.last_results is not None
-        assert out_file.read_text("utf-8") == render_report(
+        exported = out_file.read_text("utf-8")
+        stamp = re.search(r"Generated: (\S+ \S+)", exported)
+        assert stamp is not None
+        assert exported == render_report(
             app.last_sbom, app.last_results, fmt="html", short=True,
             sbom_path=app.sbom_path_var.get(), cve_path=app.cve_path_var.get(),
+            generated_at=datetime.strptime(stamp.group(1), "%Y-%m-%d %H:%M:%S"),
         )
     finally:
         destroy_root(root)
