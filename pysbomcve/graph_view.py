@@ -37,7 +37,7 @@ def _cve_label(cve: Dict[str, Any]) -> str:
 class ResultsGraphWindow(tk.Toplevel):
     """Display affected components, their ancestor paths, and matching CVEs."""
 
-    window_title = "pysbomcve - Graphical Results"
+    window_title = "pysbomcve - CVEs SBOM"
     instructions = (
         "CVEs: yellow | Affected items: red | SBOM ancestors: blue. "
         "Double-click a CVE for full details."

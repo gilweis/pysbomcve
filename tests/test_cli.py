@@ -20,6 +20,9 @@ def test_cli_execution_with_out(tmp_path: Path) -> None:
             "examples/cve.json",
             "--out",
             str(out_file),
+            "--full",
+            "--outform",
+            "json",
         ]
     )
     assert exit_code == 0

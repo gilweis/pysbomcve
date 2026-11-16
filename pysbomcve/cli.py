@@ -120,15 +120,25 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--outform",
         choices=REPORT_FORMATS,
-        default="json",
-        help="Report format for --out and the printed report: json (default) or html.",
+        default="html",
+        help="Report format for --out and the printed report: html (default) or json.",
     )
-    parser.add_argument(
+    report_kind = parser.add_mutually_exclusive_group()
+    report_kind.add_argument(
+        "--full",
+        action="store_true",
+        help=(
+            "Full report: every vulnerable item with its complete CVE records and "
+            "paths to the root, instead of the default short report."
+        ),
+    )
+    report_kind.add_argument(
         "--short",
         action="store_true",
         help=(
-            "Short report: only the top SBOM tree levels (see --depth), each item "
-            "with all CVE IDs and scores in it or below it; items without CVEs are omitted."
+            "Short report (the default): the SBOM tree levels selected by --depth, "
+            "each item with all CVE IDs and scores in it or below it; items without "
+            "CVEs are omitted."
         ),
     )
     parser.add_argument(
@@ -138,8 +148,7 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="N",
         help=(
             "Tree levels in the short report, from 1 (roots only) to the SBOM's "
-            "maximum depth (default: 2, roots and the items directly below them). "
-            "Requires --short."
+            "maximum depth (default: the maximum depth). Not allowed with --full."
         ),
     )
     parser.add_argument(
@@ -172,10 +181,10 @@ class _DepthError(ValueError):
 def _scan_and_render(
     parsed_args: argparse.Namespace, sbom_path: Path, cve_path: Path
 ) -> Tuple[List[Dict[str, Any]], str]:
-    """Match the inputs and render the report selected by --outform and --short."""
+    """Match the inputs and render the report selected by --outform and --full."""
     parsed_sbom = parse_sbom(sbom_path)
-    depth = 2 if parsed_args.depth is None else parsed_args.depth
-    if parsed_args.short:
+    depth = parsed_args.depth
+    if depth is not None:
         # Check before the potentially slow CVE loading.
         max_depth = max(sbom_max_depth(parsed_sbom), 1)
         if not 1 <= depth <= max_depth:
@@ -184,7 +193,7 @@ def _scan_and_render(
             )
     results = SBOMCVEMatcher().match(parsed_sbom, parse_cve_records(cve_path))
     report = render_report(
-        parsed_sbom, results, fmt=parsed_args.outform, short=parsed_args.short,
+        parsed_sbom, results, fmt=parsed_args.outform, short=not parsed_args.full,
         sbom_path=str(sbom_path), cve_path=str(cve_path), indent=parsed_args.indent,
         depth=depth,
     )
@@ -195,8 +204,8 @@ def _check_cli_args(parser: argparse.ArgumentParser, parsed_args: argparse.Names
     """Reject option combinations that only apply to other modes (exits on error)."""
     if parsed_args.examples_dir is not None:
         parser.error("--examples-dir requires --gui")
-    if parsed_args.depth is not None and not parsed_args.short:
-        parser.error("--depth requires --short")
+    if parsed_args.depth is not None and parsed_args.full:
+        parser.error("--depth cannot be used with --full")
     if not parsed_args.sbom or not parsed_args.cve:
         parser.error("the following arguments are required: --sbom, --cve (or use --gui)")
 
@@ -258,7 +267,7 @@ def run_cli(args: Optional[List[str]] = None) -> int:
         print("\nNo vulnerabilities matched against the provided SBOM components.")
 
     # Print the selected report to console
-    kind = "Short" if parsed_args.short else "Full"
+    kind = "Full" if parsed_args.full else "Short"
     print(f"\n--- {kind} {parsed_args.outform.upper()} Report ---")
     print(report)
 

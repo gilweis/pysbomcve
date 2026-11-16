@@ -203,7 +203,7 @@ class SBOMCVEApp:
         options_frame.pack(fill=tk.X, pady=(0, 8))
         ttk.Button(
             options_frame,
-            text="Graphical Results...",
+            text="CVEs SBOM...",
             command=self.show_graph,
         ).pack(side=tk.LEFT)
         ttk.Button(
@@ -621,29 +621,28 @@ class SBOMCVEApp:
         dialog.transient(self.root)
         frame = ttk.Frame(dialog, padding=12)
         frame.pack(fill=tk.BOTH, expand=True)
-        report_var = tk.StringVar(dialog, value="full")
-        format_var = tk.StringVar(dialog, value="json")
+        report_var = tk.StringVar(dialog, value="short")
+        format_var = tk.StringVar(dialog, value="html")
         ttk.Label(frame, text="Report:").grid(row=0, column=0, sticky=tk.W)
-        ttk.Radiobutton(frame, text="Full (all vulnerable items and CVE details)",
-                        variable=report_var, value="full").grid(row=0, column=1, sticky=tk.W)
         ttk.Radiobutton(
-            frame, text="Short (top tree levels, with CVE IDs and scores in and below each item)",
+            frame, text="Short (SBOM tree, with CVE IDs and scores in and below each item)",
             variable=report_var, value="short",
-        ).grid(row=1, column=1, sticky=tk.W)
+        ).grid(row=0, column=1, sticky=tk.W)
+        ttk.Radiobutton(frame, text="Full (all vulnerable items and CVE details)",
+                        variable=report_var, value="full").grid(row=2, column=1, sticky=tk.W)
         ttk.Label(frame, text="Format:").grid(row=3, column=0, sticky=tk.W, pady=(8, 0))
-        ttk.Radiobutton(frame, text="JSON", variable=format_var, value="json").grid(
-            row=3, column=1, sticky=tk.W, pady=(8, 0))
         ttk.Radiobutton(frame, text="HTML", variable=format_var, value="html").grid(
+            row=3, column=1, sticky=tk.W, pady=(8, 0))
+        ttk.Radiobutton(frame, text="JSON", variable=format_var, value="json").grid(
             row=4, column=1, sticky=tk.W)
 
         max_depth = max(sbom_max_depth(self.last_sbom), 1)
-        depth_var = tk.StringVar(dialog, value=str(min(2, max_depth)))
+        depth_var = tk.StringVar(dialog, value=str(max_depth))
         depth_row = ttk.Frame(frame)
-        depth_row.grid(row=2, column=1, sticky=tk.W, padx=(20, 0))
+        depth_row.grid(row=1, column=1, sticky=tk.W, padx=(20, 0))
         ttk.Label(depth_row, text="Depth:").pack(side=tk.LEFT)
         depth_box = ttk.Spinbox(
             depth_row, from_=1, to=max_depth, textvariable=depth_var, width=5,
-            state=tk.DISABLED,
         )
         depth_box.pack(side=tk.LEFT, padx=4)
         ttk.Label(
@@ -654,7 +653,7 @@ class SBOMCVEApp:
 
         def export() -> None:
             fmt, short = format_var.get(), report_var.get() == "short"
-            depth = 2
+            depth: Optional[int] = None
             if short:
                 try:
                     depth = int(depth_var.get())
@@ -682,9 +681,12 @@ class SBOMCVEApp:
         return dialog
 
     def export_report(
-        self, out_path: str, *, short: bool, fmt: str, depth: int = 2
+        self, out_path: str, *, short: bool, fmt: str, depth: Optional[int] = None
     ) -> bool:
-        """Write the last scan as the same full/short JSON/HTML report as the CLI."""
+        """Write the last scan as the same full/short JSON/HTML report as the CLI.
+
+        A short report's ``depth`` defaults to the SBOM's maximum depth.
+        """
         if self.last_results is None or self.last_sbom is None:
             messagebox.showinfo("No Scan Results", "Run a scan before exporting a report.")
             return False
