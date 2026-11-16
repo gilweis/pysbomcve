@@ -47,14 +47,16 @@ def parse_version_safe(ver_str: str) -> Union[pkg_version.Version, Tuple[Any, ..
     try:
         return pkg_version.parse(cleaned)
     except pkg_version.InvalidVersion:
-        # Fallback: tokenize digits and alphanumeric words
+        # Fallback: tokenize digits and alphanumeric words. Each token is a
+        # (kind, value) pair so words and numbers never compare directly (which
+        # raises TypeError); words sort before numbers, like pre-release tags.
         tokens = re.findall(r"(\d+|[a-zA-Z]+)", cleaned)
-        normalized_tokens: list[Union[int, str]] = []
+        normalized_tokens: list[Tuple[int, Union[int, str]]] = []
         for token in tokens:
             if token.isdigit():
-                normalized_tokens.append(int(token))
+                normalized_tokens.append((1, int(token)))
             else:
-                normalized_tokens.append(token.lower())
+                normalized_tokens.append((0, token.lower()))
         return tuple(normalized_tokens)
 
 

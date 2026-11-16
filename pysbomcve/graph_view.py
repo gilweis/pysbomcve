@@ -5,8 +5,9 @@ from __future__ import annotations
 import json
 import tkinter as tk
 from tkinter import messagebox, ttk
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
+from pysbomcve.cve_parser import CVSS_VERSIONS
 from pysbomcve.report import sbom_max_depth
 from pysbomcve.sbom_parser import ParsedSBOM
 
@@ -24,13 +25,57 @@ def _display_name(item: Dict[str, Any], name: Optional[str] = None) -> str:
     return f"{group}/{name}" if group else str(name)
 
 
-def _cve_label(cve: Dict[str, Any]) -> str:
-    """Format a CVE ID with its CVSS score and severity, when known."""
+_ANY_VERSION = "Highest (any)"
+
+
+def _cve_score(
+    cve: Dict[str, Any], version: Optional[str] = None
+) -> Tuple[Optional[float], Optional[str]]:
+    """Return the CVE's (score, severity) for a CVSS version, or its highest overall."""
+    if version is None:
+        return cve.get("score"), cve.get("severity")
+    entry = (cve.get("scores") or {}).get(version) or {}
+    return entry.get("score"), entry.get("severity")
+
+
+def _cve_label(cve: Dict[str, Any], version: Optional[str] = None) -> str:
+    """Format a CVE ID with its CVSS score and severity for the chosen version."""
     cve_id = cve.get("cveId", "Unknown CVE")
-    score, severity = cve.get("score"), cve.get("severity")
+    score, severity = _cve_score(cve, version)
+    prefix = f"CVSS {version}: " if version else ""
     if score is None:
-        return f"{cve_id} (score: N/A)"
-    return f"{cve_id} ({score} {severity})" if severity else f"{cve_id} ({score})"
+        return f"{cve_id} ({prefix or 'score: '}N/A)"
+    rating = f"{score} {severity}" if severity else f"{score}"
+    return f"{cve_id} ({prefix}{rating})"
+
+
+# A text line drawn on a node: (text, color, bold).
+_Line = Tuple[str, str, bool]
+_TEXT_COLOR = "#1e293b"
+# Same colors as the HTML reports.
+_SEVERITY_STYLES = {
+    "CRITICAL": ("#991b1b", True), "HIGH": ("#dc2626", False), "MEDIUM": ("#ea580c", False),
+}
+
+
+def _severity_line(text: str, severity: Optional[str], indent: str = "") -> _Line:
+    color, bold = _SEVERITY_STYLES.get(str(severity or "").upper(), (_TEXT_COLOR, False))
+    return indent + text, color, bold
+
+
+def _cve_lines(cve: Dict[str, Any]) -> List[_Line]:
+    """Show a CVE with every CVSS version's score, each colored by its severity.
+
+    CVEs without per-version scores keep the single ``ID (score severity)`` line.
+    """
+    versions = cve.get("scores") or {}
+    if not versions:
+        return [_severity_line(_cve_label(cve), cve.get("severity"))]
+    lines = [_severity_line(str(cve.get("cveId", "Unknown CVE")), cve.get("severity"))]
+    for version, entry in versions.items():
+        rating = f"{entry.get('score')} {entry.get('severity') or ''}".rstrip()
+        lines.append(_severity_line(f"CVSS {version}: {rating}", entry.get("severity"), "    "))
+    return lines
 
 
 # pylint: disable=too-many-instance-attributes
@@ -53,6 +98,7 @@ class ResultsGraphWindow(tk.Toplevel):
         self._results = results
         self._zoom_percent = 100
         self._score_range: Optional[Tuple[float, float]] = None
+        self._score_version: Optional[str] = None
 
         ttk.Label(
             self,
@@ -81,6 +127,7 @@ class ResultsGraphWindow(tk.Toplevel):
 
         self.score_min_var = tk.StringVar(self)
         self.score_max_var = tk.StringVar(self)
+        self.score_version_var = tk.StringVar(self, value=_ANY_VERSION)
         self._score_filter_label = self._create_score_controls()
 
         frame = ttk.Frame(self)
@@ -113,8 +160,17 @@ class ResultsGraphWindow(tk.Toplevel):
     def _create_score_controls(self) -> ttk.Label:
         controls = ttk.Frame(self, padding=(10, 0, 10, 8))
         controls.pack(fill=tk.X)
-        ttk.Label(controls, text="CVSS score range (0-10):").pack(side=tk.LEFT)
         state = tk.NORMAL if self.score_filter_available else tk.DISABLED
+        ttk.Label(controls, text="CVSS version:").pack(side=tk.LEFT)
+        version_box = ttk.Combobox(
+            controls, textvariable=self.score_version_var, width=13,
+            values=(_ANY_VERSION, *CVSS_VERSIONS),
+            state="readonly" if self.score_filter_available else tk.DISABLED,
+        )
+        version_box.pack(side=tk.LEFT, padx=(6, 12))
+        version_box.bind("<<ComboboxSelected>>", lambda _event: self._set_score_version(
+            self.score_version_var.get()))
+        ttk.Label(controls, text="CVSS score range (0-10):").pack(side=tk.LEFT)
         ttk.Entry(controls, textvariable=self.score_min_var, width=6, state=state).pack(
             side=tk.LEFT, padx=(6, 0)
         )
@@ -152,7 +208,7 @@ class ResultsGraphWindow(tk.Toplevel):
             )
             return
         self._score_range = (low, high)
-        self._score_filter_label.configure(text=f"Applied: {low:g} to {high:g}; unscored hidden")
+        self._update_score_status()
         self._render_graph()
 
     def _clear_score_filter(self) -> None:
@@ -160,13 +216,29 @@ class ResultsGraphWindow(tk.Toplevel):
         self.score_min_var.set("")
         self.score_max_var.set("")
         self._score_range = None
-        self._score_filter_label.configure(text="No score filter")
+        self._update_score_status()
         self._render_graph()
+
+    def _set_score_version(self, version: str) -> None:
+        """Label and filter CVEs by one CVSS version's score, or the highest of any."""
+        self._score_version = version if version in CVSS_VERSIONS else None
+        self.score_version_var.set(self._score_version or _ANY_VERSION)
+        self._update_score_status()
+        self._render_graph()
+
+    def _update_score_status(self) -> None:
+        version = f"CVSS {self._score_version}" if self._score_version else "highest score"
+        if self._score_range is None:
+            text = "No score filter"
+        else:
+            low, high = self._score_range
+            text = f"Applied: {low:g} to {high:g} ({version}); unscored hidden"
+        self._score_filter_label.configure(text=text)
 
     def _matches_score(self, cve: Dict[str, Any]) -> bool:
         if self._score_range is None:
             return True
-        score = cve.get("score")
+        score = _cve_score(cve, self._score_version)[0]
         return (
             isinstance(score, (int, float))
             and self._score_range[0] <= score <= self._score_range[1]
@@ -284,24 +356,35 @@ class ResultsGraphWindow(tk.Toplevel):
                 self.canvas.yview_scroll(units, "units")
         return "break"
 
-    # pylint: disable=too-many-arguments,too-many-positional-arguments
+    # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
     def _draw_node(
-        self, x: float, y: float, width: int, label: str, color: str, tag: str
+        self, x: float, y: float, width: int, label: Union[str, List[_Line]],
+        color: str, tag: str,
     ) -> Tuple[float, float, float, float]:
-        """Draw a card sized to its complete, wrapped text."""
+        """Draw a card sized to its complete, wrapped text.
+
+        ``label`` is plain text or a list of separately colored lines.
+        """
         scale = self._zoom_percent / 100
-        text = self.canvas.create_text(
-            (x + 12) * scale, (y + 12) * scale, text=label,
-            width=(width - 24) * scale, anchor=tk.NW,
-            font=("Segoe UI", max(1, round(10 * scale))), tags=(tag, "node"),
-        )
-        bounds = self.canvas.bbox(text)
-        height = max(64, bounds[3] / scale - y + 12) if bounds else 64
+        lines = [(label, _TEXT_COLOR, False)] if isinstance(label, str) else label
+        size = max(1, round(10 * scale))
+        items: List[int] = []
+        bottom = (y + 12) * scale
+        for line, fill, bold in lines:
+            items.append(self.canvas.create_text(
+                (x + 12) * scale, bottom, text=line, fill=fill,
+                width=(width - 24) * scale, anchor=tk.NW,
+                font=("Segoe UI", size, "bold") if bold else ("Segoe UI", size),
+                tags=(tag, "node"),
+            ))
+            bottom = (self.canvas.bbox(items[-1]) or (0, 0, 0, bottom))[3]
+        height = max(64, bottom / scale - y + 12)
         rectangle = self.canvas.create_rectangle(
             x * scale, y * scale, (x + width) * scale, (y + height) * scale,
             fill=color, outline=_DEFAULT_COLOR, width=max(1, scale), tags=(tag, "node"),
         )
-        self.canvas.tag_lower(rectangle, text)
+        if items:
+            self.canvas.tag_lower(rectangle, items[0])
         return x, y, x + width, y + height
 
     def _connect_nodes(
@@ -332,8 +415,10 @@ class ResultsGraphWindow(tk.Toplevel):
                 continue
             tag = f"cve-{index}-{cve_index}"
             description = "\n\n".join(cve.get("descriptions", []))
-            label = f"{_cve_label(cve)}\n\n"
-            label += description or "No description provided."
+            label = _cve_lines(cve) + [
+                (" ", _TEXT_COLOR, False),
+                (description or "No description provided.", _TEXT_COLOR, False),
+            ]
             bounds = self._draw_node(30, cve_y, 400, label, "#fff4cc", tag)
             cve_nodes.append(bounds)
             cve_y = bounds[3] + 20
@@ -650,11 +735,12 @@ class SBOMTreeWindow(ResultsGraphWindow):
             cve for cve in self._cves_by_item.get(id(component.raw_data), [])
             if self._matches_score(cve)
         ]
-        label = _display_name(component.raw_data, component.name)
+        name = _display_name(component.raw_data, component.name)
         if component.version:
-            label += f"\n{component.version}"
-        if cves:
-            label += "\n" + "\n".join(_cve_label(cve) for cve in cves)
+            name += f"\n{component.version}"
+        label: List[_Line] = [(name, _TEXT_COLOR, False)]
+        for cve in cves:
+            label.extend(_cve_lines(cve))
         return self._draw_node(
             30 + depth * 330, y, 270, label,
             "#fde2e2" if cves else "#e4efff", tag,

@@ -29,7 +29,18 @@ def test_parse_version_safe() -> None:
     # Custom non-PEP 440 version tag fallback
     v_custom = parse_version_safe("1.2.3.Final")
     assert isinstance(v_custom, tuple)
-    assert 1 in v_custom
+    assert v_custom == ((1, 1), (1, 2), (1, 3), (0, "final"))
+
+
+def test_compare_versions_mixing_words_and_numbers() -> None:
+    """Non-PEP 440 versions with words where others have numbers must not raise."""
+    assert compare_versions("r123", "1.0.x") < 0
+    assert compare_versions("1.0.x", "r123") > 0
+    assert compare_versions("1.0.x", "1.0.5") < 0
+    assert compare_versions("1.2.x", "1.2.x") == 0
+    assert is_version_vulnerable(
+        "abc123", [{"version": "0", "lessThan": "5.x", "status": "affected"}]
+    ) in (True, False)
 
 
 def test_compare_versions() -> None:

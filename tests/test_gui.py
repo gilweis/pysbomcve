@@ -277,11 +277,9 @@ def test_gui_sbom_tree_button_and_scan_snapshot(
         child for child in tk_app.root.winfo_children()
         if isinstance(child, SBOMTreeWindow)
     )
-    labels = [
-        tree.canvas.itemcget(node, "text")
-        for node in tree.canvas.find_withtag("node")
-        if tree.canvas.type(node) == "text"
-    ]
+    labels = ["\n".join(tree.canvas.itemcget(n, "text") for n in tree.canvas.find_withtag(tag)
+                        if tree.canvas.type(n) == "text")
+              for tag in tree._component_tags]  # pylint: disable=protected-access
     assert len(labels) == len(sbom.components)
     for c in sbom.components.values():
         assert any(label.split("\n")[0] == _display_name(c.raw_data, c.name) for label in labels)
@@ -476,11 +474,12 @@ def test_gui_sbom_tree_shared_dependencies_cycles_and_highlights(
     colors = {}
     for index, component in enumerate(data["components"]):
         nodes = tree.canvas.find_withtag(f"component-{index}")
-        text = next(node for node in nodes if tree.canvas.type(node) == "text")
         rectangle = next(node for node in nodes if tree.canvas.type(node) == "rectangle")
-        labels[component["bom-ref"]] = tree.canvas.itemcget(text, "text")
+        labels[component["bom-ref"]] = "\n".join(
+            tree.canvas.itemcget(n, "text") for n in nodes if tree.canvas.type(n) == "text")
         colors[component["bom-ref"]] = tree.canvas.itemcget(rectangle, "fill")
-    assert len(tree.canvas.find_withtag("node")) == 2 * len(data["components"])
+    assert len([node for node in tree.canvas.find_withtag("node")
+                if tree.canvas.type(node) == "rectangle"]) == len(data["components"])
     assert len(tree.canvas.find_withtag("edge")) == 6
     assert "CVE-2023-32681" in labels["old"] and "CVE-2026-9999" in labels["old"]
     assert "CVE-" not in labels["new"]
@@ -716,8 +715,8 @@ def test_gui_graph_connects_all_paths_and_cves(tk_app: SBOMCVEApp) -> None:
     assert "root-item" in labels
     assert "parent-a" in labels and "parent-b" in labels
     assert labels.count("shared-root") == 2
-    assert "CVE-2026-0001 (score: N/A)\n\nFirst description." in labels
-    assert "CVE-2026-0002 (score: N/A)\n\nSecond description." in labels
+    assert "CVE-2026-0001 (score: N/A)" in labels and "First description." in labels
+    assert "CVE-2026-0002 (score: N/A)" in labels and "Second description." in labels
     assert "No recorded ancestors." in labels
     assert len(graph.canvas.find_withtag("edge")) == 7
 

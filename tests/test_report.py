@@ -44,8 +44,8 @@ def test_short_report_lists_roots_and_children_with_cves_below() -> None:
     """Children without CVEs on or below them are omitted; CVEs are deduplicated."""
     sbom, results = _sbom_and_results()
     both = [
-        {"cveId": "CVE-1", "score": 9.8, "severity": "CRITICAL"},
-        {"cveId": "CVE-2", "score": None, "severity": None},
+        {"cveId": "CVE-1", "score": 9.8, "severity": "CRITICAL", "scores": {}},
+        {"cveId": "CVE-2", "score": None, "severity": None, "scores": {}},
     ]
     assert build_short_report(sbom, results, depth=2) == [
         {"id": "root", "name": "root", "version": "1.0", "cves": both,
@@ -132,6 +132,24 @@ def test_html_colors_cves_by_severity() -> None:
     for page in (short, full):
         assert ".sev-critical{color:#991b1b;font-weight:bold}" in page
         assert ".sev-high{color:#dc2626}" in page and ".sev-medium{color:#ea580c}" in page
+
+
+def test_html_shows_every_cvss_version() -> None:
+    """Each CVSS version's score appears, colored by that version's own severity."""
+    sbom, results = _sbom_and_results()
+    results[0]["cves"] = [{
+        "cveId": "CVE-V", "score": 10.0, "severity": "HIGH", "title": "t",
+        "scores": {"3.1": {"score": 9.8, "severity": "CRITICAL"},
+                   "2.0": {"score": 10.0, "severity": "HIGH"}},
+    }]
+    versions = ('<span class="sev-critical">CVSS 3.1: 9.8 CRITICAL</span>',
+                '<span class="sev-high">CVSS 2.0: 10.0 HIGH</span>')
+    short = render_report(sbom, results)
+    assert f'<span class="sev-high">CVE-V</span> ({versions[0]} | {versions[1]})' in short
+    assert f"<td>{versions[0]}<br>{versions[1]}</td>" in render_report(
+        sbom, results, short=False)
+    data = json.loads(render_report(sbom, results, fmt="json"))
+    assert data["items"][0]["cves"][0]["scores"] == results[0]["cves"][0]["scores"]
 
 
 def test_reports_include_generation_time_and_sources() -> None:

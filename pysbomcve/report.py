@@ -26,6 +26,7 @@ def _cve_summary(cves: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
         cve_id = str(cve.get("cveId", "Unknown CVE"))
         unique.setdefault(cve_id, {
             "cveId": cve_id, "score": cve.get("score"), "severity": cve.get("severity"),
+            "scores": dict(cve.get("scores") or {}),
         })
     return sorted(
         unique.values(),
@@ -47,6 +48,24 @@ def _severity_attr(cve: Dict[str, Any]) -> str:
     """Return an HTML class attribute coloring CRITICAL, HIGH, and MEDIUM CVEs."""
     css = _SEVERITY_CLASSES.get(str(cve.get("severity") or "").strip().upper())
     return f" class=\"{css}\"" if css else ""
+
+
+def _version_spans(cve: Dict[str, Any]) -> List[str]:
+    """Return one colored ``CVSS <version>: <score> <severity>`` span per CVSS version."""
+    spans = []
+    for version, entry in (cve.get("scores") or {}).items():
+        text = f"CVSS {version}: {entry.get('score')} {entry.get('severity') or ''}".rstrip()
+        spans.append(f"<span{_severity_attr(entry)}>{escape(text)}</span>")
+    return spans
+
+
+def _cve_html(cve: Dict[str, Any]) -> str:
+    """Show a CVE with every CVSS version's score, or its single score if unversioned."""
+    spans = _version_spans(cve)
+    if not spans:
+        return f"<span{_severity_attr(cve)}>{escape(_cve_label(cve))}</span>"
+    cve_id = escape(str(cve.get("cveId", "Unknown CVE")))
+    return f"<span{_severity_attr(cve)}>{cve_id}</span> ({' | '.join(spans)})"
 
 
 def _item_name(item: Dict[str, Any]) -> str:
@@ -212,7 +231,10 @@ def _full_html(results: List[Dict[str, Any]], meta: Dict[str, str]) -> str:
         body.append(f"<h2>{escape(_item_name(item))} {escape(str(version))}</h2>")
         if item.get("purl"):
             body.append(f"<p>PURL: {escape(str(item['purl']))}</p>")
-        body.append("<table><tr><th>CVE</th><th>Score</th><th>Severity</th><th>Title</th></tr>")
+        body.append(
+            "<table><tr><th>CVE</th><th>Highest score</th><th>Severity</th>"
+            "<th>CVSS versions</th><th>Title</th></tr>"
+        )
         for cve in finding.get("cves", []):
             score = cve.get("score")
             sev = _severity_attr(cve)
@@ -220,6 +242,7 @@ def _full_html(results: List[Dict[str, Any]], meta: Dict[str, str]) -> str:
                 f"<tr><td{sev}>{escape(str(cve.get('cveId', '')))}</td>"
                 f"<td{sev}>{'N/A' if score is None else escape(str(score))}</td>"
                 f"<td{sev}>{escape(str(cve.get('severity') or ''))}</td>"
+                f"<td>{'<br>'.join(_version_spans(cve))}</td>"
                 f"<td>{escape(str(cve.get('title') or ''))}</td></tr>"
             )
         body.append("</table>")
@@ -236,9 +259,7 @@ def _full_html(results: List[Dict[str, Any]], meta: Dict[str, str]) -> str:
 
 def _short_html(short: List[Dict[str, Any]], meta: Dict[str, str]) -> str:
     def cve_cell(cves: List[Dict[str, Any]]) -> str:
-        return "<br>".join(
-            f"<span{_severity_attr(cve)}>{escape(_cve_label(cve))}</span>" for cve in cves
-        )
+        return "<br>".join(_cve_html(cve) for cve in cves)
 
     def row(item: Dict[str, Any], level: int, guides: List[str]) -> str:
         spans = "".join(f"<span class=\"{guide}\"></span>" for guide in guides)

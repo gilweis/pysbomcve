@@ -75,6 +75,8 @@ class CVERecord:
         metrics: CVSS metrics list.
         cvss_score: Highest extracted CVSS base score.
         cvss_severity: Severity level (e.g. 'CRITICAL', 'HIGH', 'MEDIUM').
+        cvss_scores: Highest score per CVSS version ("4.0", "3.1", "3.0", "2.0"),
+            each a dict with ``score``, ``severity``, and ``vector``.
         problem_types: List of CWE IDs or problem type descriptions.
         references: List of reference URLs.
         affected: List of CVEAffectedProduct objects.
@@ -95,6 +97,7 @@ class CVERecord:
         references: Optional[List[str]] = None,
         affected: Optional[List[CVEAffectedProduct]] = None,
         raw_data: Optional[Dict[str, Any]] = None,
+        cvss_scores: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> None:
         """Initialize a CVE record.
 
@@ -110,6 +113,7 @@ class CVERecord:
             references: List of reference URLs.
             affected: List of affected product objects.
             raw_data: Complete raw dictionary of the CVE record.
+            cvss_scores: Highest score per CVSS version.
         """
         self.cve_id: str = cve_id
         self.state: str = state
@@ -122,6 +126,7 @@ class CVERecord:
         self.references: List[str] = references or []
         self.affected: List[CVEAffectedProduct] = affected or []
         self.raw_data: Dict[str, Any] = raw_data or {}
+        self.cvss_scores: Dict[str, Dict[str, Any]] = cvss_scores or {}
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert the CVE record to a dictionary.
@@ -136,6 +141,7 @@ class CVERecord:
             "descriptions": self.descriptions,
             "severity": self.cvss_severity,
             "score": self.cvss_score,
+            "scores": self.cvss_scores,
             "problemTypes": self.problem_types,
             "references": self.references,
             "metrics": self.metrics,
@@ -171,47 +177,85 @@ def _extract_descriptions(cna: Dict[str, Any]) -> List[str]:
     return results
 
 
-def _parse_metric_item(
-    metric: Dict[str, Any]
-) -> tuple[Optional[float], Optional[str]]:
-    """Extract score and severity from a single metric entry."""
+CVSS_VERSIONS = ("4.0", "3.1", "3.0", "2.0")
+_VERSION_KEYS = {"cvssV4_0": "4.0", "cvssV3_1": "3.1", "cvssV3_0": "3.0", "cvssV2_0": "2.0"}
+
+
+def _severity_from_score(score: float, version: Optional[str] = None) -> str:
+    """Map a CVSS base score to its version's qualitative severity rating.
+
+    CVSS 2.0 has no CRITICAL or NONE rating (7.0-10.0 is HIGH); other versions
+    use the CVSS 3.x/4.0 scale.
+    """
+    if version == "2.0":
+        if score >= 7.0:
+            return "HIGH"
+        return "MEDIUM" if score >= 4.0 else "LOW"
+    if score >= 9.0:
+        return "CRITICAL"
+    if score >= 7.0:
+        return "HIGH"
+    if score >= 4.0:
+        return "MEDIUM"
+    return "LOW" if score > 0 else "NONE"
+
+
+def _metric_scores(metric: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Return every CVSS score in one metric entry with its version and severity.
+
+    Metrics without a severity (e.g. CVSS v2, which has no ``baseSeverity``) get
+    one derived from the score using that version's rating scale.
+    """
+    entries: List[Dict[str, Any]] = []
     other_type = metric.get("other", {}).get("type")
-    for key in ("cvssV3_1", "cvssV3_0", "cvssV4_0", "cvssV2_0", "other"):
+    for key in (*_VERSION_KEYS, "other"):
         cvss_obj = metric.get(key)
-        if not isinstance(cvss_obj, dict):
+        if not isinstance(cvss_obj, dict) or cvss_obj.get("baseScore") is None:
             continue
-        score_val = cvss_obj.get("baseScore")
-        sev_val = cvss_obj.get("baseSeverity") or other_type
-        if score_val is not None:
-            try:
-                score = float(score_val)
-                sev = str(sev_val).upper() if sev_val else None
-                return score, sev
-            except (ValueError, TypeError):
-                continue
-    return None, None
+        try:
+            score = float(cvss_obj["baseScore"])
+        except (ValueError, TypeError):
+            continue
+        version = _VERSION_KEYS.get(key)
+        sev_val = cvss_obj.get("baseSeverity") or (None if version else other_type)
+        entries.append({
+            "version": version,
+            "score": score,
+            "severity": str(sev_val).upper() if sev_val
+            else _severity_from_score(score, version),
+            "vector": cvss_obj.get("vectorString"),
+        })
+    return entries
 
 
-def _extract_cvss(metrics_list: List[Dict[str, Any]]) -> tuple[Optional[float], Optional[str]]:
-    """Extract highest CVSS score and severity from metrics.
+def _extract_cvss(
+    metrics_list: List[Dict[str, Any]],
+) -> tuple[Optional[float], Optional[str], Dict[str, Dict[str, Any]]]:
+    """Extract the highest CVSS score overall and the highest score per version.
 
     Args:
         metrics_list: List of metric entries from CVE record.
 
     Returns:
-        Tuple of (cvss_score, cvss_severity).
+        Tuple of (cvss_score, cvss_severity, scores by CVSS version). The versions
+        are ordered newest first, each with ``score``, ``severity``, and ``vector``.
     """
-    max_score: Optional[float] = None
-    severity: Optional[str] = None
-
+    best_score: Optional[float] = None
+    best_severity: Optional[str] = None
+    by_version: Dict[str, Dict[str, Any]] = {}
     for metric in metrics_list:
-        if isinstance(metric, dict):
-            score, sev = _parse_metric_item(metric)
-            if score is not None and (max_score is None or score > max_score):
-                max_score = score
-                severity = sev
-
-    return max_score, severity
+        if not isinstance(metric, dict):
+            continue
+        for entry in _metric_scores(metric):
+            if best_score is None or entry["score"] > best_score:
+                best_score, best_severity = entry["score"], entry["severity"]
+            version = entry["version"]
+            if version and (version not in by_version
+                            or entry["score"] > by_version[version]["score"]):
+                by_version[version] = {k: entry[k] for k in ("score", "severity", "vector")}
+    scores = {version: by_version[version] for version in CVSS_VERSIONS
+              if version in by_version}
+    return best_score, best_severity, scores
 
 
 def _extract_problem_types(cna: Dict[str, Any]) -> List[str]:
@@ -339,7 +383,7 @@ def parse_single_cve_dict(data: Dict[str, Any]) -> Optional[CVERecord]:
     cna = containers.get("cna", {})
 
     all_metrics = _gather_metrics(containers)
-    score, severity = _extract_cvss(all_metrics)
+    score, severity, scores = _extract_cvss(all_metrics)
 
     return CVERecord(
         cve_id=cve_id,
@@ -353,6 +397,7 @@ def parse_single_cve_dict(data: Dict[str, Any]) -> Optional[CVERecord]:
         references=_extract_references(cna),
         affected=_gather_affected(containers),
         raw_data=data,
+        cvss_scores=scores,
     )
 
 

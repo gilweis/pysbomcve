@@ -26,6 +26,12 @@ def _format_cve_lines(cves: List[Dict[str, Any]]) -> List[str]:
         score = cve.get("score", "N/A")
         title = cve.get("title", "")
         lines.append(f"      * {cve_id} [Severity: {sev}, Score: {score}]")
+        versions = cve.get("scores") or {}
+        if versions:
+            lines.append("        CVSS: " + " | ".join(
+                f"{version}: {entry.get('score')} {entry.get('severity') or ''}".rstrip()
+                for version, entry in versions.items()
+            ))
         if title:
             lines.append(f"        Title: {title}")
     return lines

@@ -95,16 +95,26 @@ python -m pysbomcve --sbom examples/sbom.json --cve examples/cve.json --full --o
 
 Every report records when it was generated (local time with UTC offset), shown
 at the top of HTML reports. The short HTML report draws the SBOM tree with solid
-connector lines, like a file explorer. In HTML reports, CVEs are colored by
-severity: CRITICAL dark red and bold, HIGH red, MEDIUM orange; LOW and unscored
-CVEs use the normal text color. JSON reports are an object:
+connector lines, like a file explorer.
+
+Reports show every CVSS version a CVE record has (4.0, 3.1, 3.0, 2.0), e.g.
+`CVE-2014-0160 (CVSS 3.1: 7.5 HIGH | CVSS 2.0: 5.0 MEDIUM)`; when several metrics
+give the same version (e.g. from the CNA and an ADP), the highest is shown. In
+HTML reports, each CVE ID is colored by its highest score's severity and each
+version by its own severity: CRITICAL dark red and bold, HIGH red, MEDIUM orange;
+LOW and unscored CVEs use the normal text color. Scores without a severity get
+their version's official rating: CVSS 3.x/4.0 9.0-10.0 CRITICAL, 7.0-8.9 HIGH,
+4.0-6.9 MEDIUM, 0.1-3.9 LOW; CVSS 2.0 (which has no CRITICAL) 7.0-10.0 HIGH,
+4.0-6.9 MEDIUM, 0.0-3.9 LOW. JSON reports are an object:
 `{"generatedAt": "2026-11-15T16:05:09+02:00", "report": "full" | "short", "sbom": ..., "cve": ..., "items": [...]}`.
 For a full report, `items` is the list of vulnerable items with their complete CVE
 records and paths to the root. A short report also records `depth`, and `items`
 is a list of roots, each with `id`, `name` (`group/name` when the item has a
-group), `version`, `cves` (`cveId`, `score`, `severity`, deduplicated and sorted
-by descending score), and, when items with CVEs are listed below it, `children`
-with the same fields.
+group), `version`, `cves` (`cveId`, `score` and `severity` of the highest score,
+`scores` by CVSS version, deduplicated and sorted by descending score), and, when
+items with CVEs are listed below it, `children` with the same fields. Full-report
+CVE records also include `scores`, keyed by version (`"4.0"`, `"3.1"`, `"3.0"`,
+`"2.0"`), each with `score`, `severity`, and `vector`.
 An item shared by several parents appears under each of them; dependency cycles
 stop at the repeated item.
 
@@ -156,13 +166,21 @@ The GUI lets you:
 - Click **CVEs SBOM...** after scanning to open a separate graph window.
   Each affected item connects to its matching CVEs and to every ancestor path
   (immediate parent through root), with named nodes for each SBOM item.
-- CVE cards show the CVE ID, score, severity, and descriptions. Double-click a
-  card to open its complete details, including the raw CVE record, in a read-only dialog.
+- CVE cards show the CVE ID, every CVSS version's score and severity, and the
+  descriptions. In both graphs, CVE text uses the same colors as the HTML report:
+  the CVE ID by its highest severity, and each `CVSS <version>: <score> <severity>`
+  line by its own severity (CRITICAL dark red and bold, HIGH red, MEDIUM orange).
+  Double-click a card to open its complete details, including the raw CVE record,
+  in a read-only dialog.
 - Both graphs have an optional inclusive **CVSS score range** filter. Enter a
   minimum and/or maximum from 0 to 10 and click **Apply**; a blank bound means
   0 or 10, respectively. CVEs without scores are hidden while filtering. Click
   **Clear** to show all CVEs again. Filtering changes only the graph view, not
   scan results or full item details.
+- Choose the **CVSS version** used for the score filter: **Highest (any)** (the
+  default, the highest score of any version) or 4.0, 3.1, 3.0, or 2.0. With a
+  specific version, CVEs that have no score for it are hidden while a score range
+  is applied. All versions' scores are always shown.
 - Click **SBOM Tree...** to view every SBOM item, including items with no matched
   CVEs. Before a scan, select an SBOM file and open the tree without a CVE input.
   A warning and a banner indicate that the items have not been checked for CVEs;
@@ -170,7 +188,7 @@ The GUI lets you:
   Arrows show dependencies; shared dependencies and cycles
   are retained without duplicating items. Each item shows its name (as
   `group/name` when the SBOM item has a group, in both graphs) and version.
-  Items with displayed CVEs are red and list their IDs and scores; other items
+  Items with displayed CVEs are red and list each CVE with all its CVSS scores; other items
   are blue, including items whose CVEs are hidden by the score filter.
   Single-click an item to highlight all its ancestor and descendant paths. Outlines
   and arrows show the selected item in purple, ancestors in green, descendants in

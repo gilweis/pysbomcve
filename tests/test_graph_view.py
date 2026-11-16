@@ -317,6 +317,67 @@ def test_tree_score_filter_combines_with_paths_and_preserves_details(root: tk.Tk
     assert tree.canvas.find_withtag("component-2")
 
 
+def _styled(window: ResultsGraphWindow, text: str) -> tuple:
+    """Return the (color, bold) of the canvas text item with exactly this text."""
+    item = next(i for i in window.canvas.find_all()
+                if window.canvas.type(i) == "text" and window.canvas.itemcget(i, "text") == text)
+    font = window.canvas.itemcget(item, "font")
+    return window.canvas.itemcget(item, "fill"), "bold" in font
+
+
+def test_graph_cve_colors_match_html_report(root: tk.Tk) -> None:
+    """CRITICAL is dark red and bold, HIGH red, MEDIUM orange, others normal text."""
+    sbom = parse_sbom({"components": [{"bom-ref": "pkg", "name": "pkg"}]})
+    cves = [
+        {"cveId": "CVE-c", "score": 9.8, "severity": "CRITICAL"},
+        {"cveId": "CVE-m", "score": 5.0, "severity": "MEDIUM"},
+        {"cveId": "CVE-l", "score": 2.0, "severity": "LOW"},
+    ]
+    results = [{"item": sbom.components["pkg"].to_dict(), "cves": cves,
+                "lineage_paths": []}]
+    for window in (ResultsGraphWindow(root, results), SBOMTreeWindow(root, sbom, results)):
+        assert _styled(window, "CVE-c (9.8 CRITICAL)") == ("#991b1b", True)
+        assert _styled(window, "CVE-m (5.0 MEDIUM)") == ("#ea580c", False)
+        assert _styled(window, "CVE-l (2.0 LOW)") == ("#1e293b", False)
+        _score_button(window, "Zoom in").invoke()
+        assert _styled(window, "CVE-c (9.8 CRITICAL)") == ("#991b1b", True)
+
+
+def test_score_filter_by_cvss_version(root: tk.Tk) -> None:
+    """Filter and label by the chosen CVSS version; CVEs without it count as unscored."""
+    sbom = parse_sbom({"components": [{"bom-ref": "pkg", "name": "pkg"}]})
+    cves = [
+        {"cveId": "CVE-both", "score": 10.0, "severity": "HIGH",
+         "scores": {"3.1": {"score": 5.0, "severity": "MEDIUM"},
+                    "2.0": {"score": 10.0, "severity": "HIGH"}}},
+        {"cveId": "CVE-v2only", "score": 7.5, "severity": "HIGH",
+         "scores": {"2.0": {"score": 7.5, "severity": "HIGH"}}},
+    ]
+    results = [{"item": sbom.components["pkg"].to_dict(), "cves": cves,
+                "lineage_paths": []}]
+    for window in (ResultsGraphWindow(root, results), SBOMTreeWindow(root, sbom, results)):
+        window.update()
+        assert _styled(window, "CVE-both") == ("#dc2626", False)
+        assert _styled(window, "    CVSS 3.1: 5.0 MEDIUM") == ("#ea580c", False)
+        assert _styled(window, "    CVSS 2.0: 10.0 HIGH") == ("#dc2626", False)
+        box = next(w for frame in window.winfo_children()
+                   for w in frame.winfo_children() if isinstance(w, ttk.Combobox))
+        assert list(box.cget("values")) == ["Highest (any)", "4.0", "3.1", "3.0", "2.0"]
+        box.set("3.1")
+        box.event_generate("<<ComboboxSelected>>")
+        window.update()
+        _apply_range(window, "4", "6")
+        text = _canvas_text(window)
+        assert "CVE-both" in text and "CVE-v2only" not in text
+        assert "(CVSS 3.1)" in window._score_filter_label.cget("text")  # pylint: disable=protected-access
+        window._set_score_version("2.0")  # pylint: disable=protected-access
+        assert "CVE-both" not in _canvas_text(window)
+        window._set_score_version("Highest (any)")  # pylint: disable=protected-access
+        _apply_range(window, "7", "10")
+        text = _canvas_text(window)
+        assert "CVE-both" in text and "CVE-v2only" in text and "CVSS 2.0: 7.5 HIGH" in text
+
+
 @pytest.mark.parametrize("low,high", [
     ("abc", "9"), ("9", "2"), ("-1", "5"), ("0", "11"), ("nan", "10"), ("0", "inf"),
 ])
@@ -341,4 +402,5 @@ def test_score_filter_disabled_for_preview(root: tk.Tk) -> None:
         widget for frame in tree.winfo_children() for widget in frame.winfo_children()
         if isinstance(widget, ttk.Entry)
     ]
-    assert len(entries) == 2 and all(str(entry.cget("state")) == tk.DISABLED for entry in entries)
+    # The two score entries and the CVSS version box (a ttk.Entry subclass).
+    assert len(entries) == 3 and all(str(entry.cget("state")) == tk.DISABLED for entry in entries)
